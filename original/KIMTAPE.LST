@@ -1,0 +1,1513 @@
+
+Page 1     KIMTAPE.SCR
+
+Scr# 0 
+  0 \ Information
+  1 
+  2 Conversion utility for KIM-1 and SYM-1 format tapes.
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 1 
+  0 \ Load - main screen
+  1 empty  forth definitions  decimal
+  2 application  warning on
+  3 
+  4 : TITLE ." KIMTAPE version 0.5  17-May-04" cr ;
+  5 
+  6 cr .( Compiling: )  title  2 load
+  7 
+  8 cr .( Save to disk? )  y/n
+  9 [if]  turnkey program  KIMTAPE.COM  [then]
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 2 
+  0 \ Load - defers
+  1 defer ?BREAK  ' noop is ?break      \ user break check
+  2 defer SET-IO  ' noop is set-io      \ set console method
+  3 defer ERRFIX  ' noop is errfix      \ on error handler
+  4 
+  5 3 load      \ load electives and application
+  6 
+  7  ' (?break) is ?break          \ enable user break
+  8  ' dos-io is set-io            \ enable console redirection
+  9 \ ' deloutfile +defer errfix    \ delete outfile on error
+ 10 \ wrtchk off                    \ disable overwrite check
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 2     KIMTAPE.SCR
+
+Scr# 3 
+  0 \ Load - electives and application
+  1  4 5 thru                       \ error handler
+  2  6 load                         \ number output
+  3  7 load                         \ basic strings
+  4 \ 8 load                         \ extra strings
+  5  9 14 thru                      \ command-line parsing
+  6  15 17 thru                     \ file primitives
+  7  18 23 thru                     \ default files
+  8  24 load                        \ buffered input file
+  9  25 load                        \ buffered output file
+ 10  30 #screens 1- thru            \ application
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 4 
+  0 \ Error handler - +DEFER ?THROW ?CATCH
+  1 system
+  2 \ Append a new behaviour to an existing deferred word
+  3 : +DEFER  ( xt <name> -- )  >r  :noname  r> compile,
+  4   ' >body dup @ compile,  >r  postpone ;  r> ! ;
+  5 application
+  6 
+  7 \ THROW exception code n if flag is non-zero
+  8 : ?THROW  ( flag n -- )  swap 0<> and throw ;
+  9 
+ 10 \ Perform CATCH intercepting exception code n only
+ 11 : ?CATCH  ( xt n -- n )  >r catch dup r> <> over and throw ;
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 5 
+  0 \ Error handler - ERROR1 ERROR2 ESC= ESCKEY? (?BREAK)
+  1 \ Quit to DOS with no msg and return code = 1
+  2 : ERROR1  ( -- )  abort ;
+  3 
+  4 \ Quit with abort msg
+  5 : ERROR2  ( -- )  ."  ... aborting"  error1 ;
+  6 
+  7 \ Test char for ESC or Ctrl-C
+  8 : ESC=  ( char -- flag )  dup 27 =  swap 3 =  or ;
+  9 
+ 10 \ Check if ESC or Ctrl-C key was pressed
+ 11 : ESCKEY?  ( -- flag )  0  key? if  key esc=  or  then ;
+ 12 
+ 13 \ Check user break
+ 14 : (?BREAK)  ( -- )  esckey? if  beep cr
+ 15   ." User break - exit program? " y/n if  error2  then  then ;
+
+Page 3     KIMTAPE.SCR
+
+Scr# 6 
+  0 \ Number output -
+  1 : (UD.) ( ud -- addr u )  <# #s #> ;
+  2 : (U.)  ( u  -- addr u )  0 (d.) ;
+  3 : (.)   ( n  -- addr u )  s>d (d.) ;
+  4 : UD.   ( ud -- )  (ud.) type space ;
+  5 : UD.R  ( ud n -- )  >r (ud.) r> over - spaces type ;
+  6 
+  7 : (DH.) ( ud -- addr u )
+  8   base @ >r hex <# 8 0 do # loop #> r> base ! ;
+  9 : (H.)  ( u -- addr u )  0 (dh.) 4 /string ;
+ 10 : (HB.) ( u -- addr u )  (h.) 2 /string ;
+ 11 : DH.   ( ud -- )  (dh.) type space ;
+ 12 : H.    ( u -- )  (h.) type space ;
+ 13 : HB.   ( u -- )  (hb.) type space ;
+ 14 
+ 15 
+
+Scr# 7 
+  0 \ Strings - SPLIT STRING+C C/STRING STRING/
+  1 \ Split string at character leaving first on top
+  2 : SPLIT  ( a u char -- a2 u2 a3 u3 )
+  3   >r 2dup r> scan 2swap 2 pick - ;
+  4 
+  5 \ Append character to end of string
+  6 : STRING+C  ( a u char -- a2 u2 )  >r 2dup + r> swap c! 1+ ;
+  7 
+  8 \ Extract character from start of string
+  9 : C/STRING  ( a u -- a2 u2 char )  over >r 1 /string r> c@ ;
+ 10 
+ 11 \ Return n right-most characters of string
+ 12 : STRING/  ( a u n -- a2 u2 )  over min over swap - /string ;
+ 13 
+ 14 
+ 15 
+
+Scr# 8 
+  0 \ Strings - S= S+ STRING S!
+  1 \ Compare two strings for equality
+  2 : S=  ( a1 u1 a2 u2 -- flag )  compare 0= ;
+  3 
+  4 255 ( buffer size ) local %1  dup , allot
+  5 
+  6 \ Concatenate two strings placing result in temp buffer
+  7 : S+  ( a1 u1 a2 u2 -- a3 u3 )  2>r  %1 @ min  %1 cell+ 0
+  8   2swap string+  %1 @  over -  2r> rot min  string+ ;
+  9 
+ 10 \ Define string variable with max length u
+ 11 -? : STRING  create ( u -- ) 255 min dup c, 0 c, allot
+ 12   does> ( -- a u ) 1+ count ;
+ 13 
+ 14 \ Store string a u to string variable
+ 15 : S!  ( a u sa su -- )  drop  1- dup >r  1- c@ min  r> place ;
+
+Page 4     KIMTAPE.SCR
+
+Scr# 9 
+  0 \ Cmdline parsing - ARGC ARGV
+  1 create ARGC  ( -- a )
+  2   1 cells allot ( item# )  2 cells allot ( string )
+  3   argc 3 cells erase
+  4 
+  5 \ Parse next string  ARGC OFF resets
+  6 : ARGV  ( -- a u -1 | 0 )
+  7   1 argc +!
+  8   argc cell+ 2@  0 0
+  9   argc @  0 ?do
+ 10     2drop  bl skip  bl split
+ 11   loop  2swap 2drop
+ 12   dup if  -1  else  and  then ;
+ 13 
+ 14 
+ 15 
+
+Scr# 10 
+  0 \ Cmdline parsing - BADOPTION /NUM /HEXNUM /NUMRANGE
+  1 : BADOPTION  ( -- )  cr ." Invalid option"  error2 ;
+  2 
+  3 \ Parse number n from string
+  4 : /NUM  ( a u -- 0 0 n )  number?
+  5   if  drop  else  badoption  then  0 0 ( stop parsing) rot ;
+  6 
+  7 \ Parse hex number n from string
+  8 : /HEXNUM  ( a u -- 0 0 n )  base @ >r  hex /num  r> base ! ;
+  9 
+ 10 \ As for /NUM but checks n3 is in the range n1 to n2
+ 11 : /NUMRANGE  ( a u n1 n2 -- 0 0 n3 )
+ 12   2>r /num  dup  2r> 1+  within  0= if badoption then ;
+ 13 
+ 14 
+ 15 
+
+Scr# 11 
+  0 \ Cmdline parsing - SETOPTION
+  1 \ Process each character in a switch option string
+  2 defer SETOPTION  ( a u char -- a u )  ' drop is setoption
+  3 
+  4 exit
+  5 
+  6 \ Example of use
+  7 : (SETOPTION)  ( a u char -- a u )
+  8   upcase [char] A = if  A-variable on  else  badoption  then ;
+  9 
+ 10 ' (setoption) is setoption
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 5     KIMTAPE.SCR
+
+Scr# 12 
+  0 \ Cmdline parsing - PARSEOPTION
+  1 \ Parse multiple switch options from the command-line
+  2 : PARSEOPTION  ( -- )
+  3   begin
+  4     argv
+  5   while  ( not end )
+  6     c/string
+  7     dup [char] / =  swap [char] - =  or if ( switch )
+  8       begin  dup
+  9       while  c/string setoption
+ 10       repeat  2drop
+ 11     else
+ 12       2drop  -1 argc +! ( backup )  exit
+ 13     then
+ 14   repeat ;
+ 15 
+
+Scr# 13 
+  0 \ Cmdline parsing - PARSEFILENAME
+  1 \ Parse one or more strings/filenames from the command-line
+  2 defer PARSEFILENAME  ( -- )  ' noop is parsefilename
+  3 
+  4 exit
+  5 
+  6 \ Example of use
+  7 : (PARSEFILENAME)  ( -- )
+  8   argv 0= if ." no filename specified"  error1  then
+  9   64 min infile place ;
+ 10 
+ 11 ' (parsefilename) is parsefilename
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 14 
+  0 \ Cmdline parsing - CMD! CMD@ PARSECMD
+  1 \ Set command string for parsing
+  2 : CMD!  ( a u -- )  argc cell+ 2!  argc off ;
+  3 
+  4 \ Get command-line string
+  5 : CMD@  ( -- a u )  128 count ;
+  6 
+  7 \ Parse command-line setting options/filenames
+  8 : PARSECMD  ( -- )
+  9   cmd@ cmd!  parseoption  parsefilename ;
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 6     KIMTAPE.SCR
+
+Scr# 15 
+  0 \ File primitives - ?FERROR
+  1 \ Display msg and abort on file error
+  2 : ?FERROR  ( ior n -- )
+  3   swap if
+  4     cr ." File "  case
+  5       3  of  ." read"  endof
+  6       4  of  ." write"  endof
+  7       5  of  ." position"  endof
+  8       6  of  ." size"  endof
+  9     endcase
+ 10     ."  error"  error2
+ 11   else  drop  then ;
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 16 
+  0 \ File primitives - READF WRITEF READL WRITEL
+  1 \ Read binary
+  2 : READF  ( a u handle -- a u2 )
+  3   ?break  >r over swap r>  read-file  3 ?ferror ;
+  4 
+  5 \ Write binary
+  6 : WRITEF  ( a u handle -- )
+  7   ?break  write-file  4 ?ferror ;
+  8 
+  9 \ Read text  flag=0 if end-of-file
+ 10 : READL  ( a u handle -- a u2 flag )
+ 11   ?break  >r over swap r>  read-line  3 ?ferror ;
+ 12 
+ 13 \ Write text
+ 14 : WRITEL  ( a u handle -- )
+ 15   ?break  write-line  4 ?ferror ;
+
+Scr# 17 
+  0 \ File primitives - FPOS REPOSF FSIZE RESIZEF
+  1 \ File position
+  2 : FPOS  ( handle  -- ud )  file-position  5 ?ferror ;
+  3 
+  4 \ Reposition file
+  5 : REPOSF  ( ud handle  -- )  reposition-file  5 ?ferror ;
+  6 
+  7 \ File size
+  8 : FSIZE  ( handle  -- ud )  file-size  6 ?ferror ;
+  9 
+ 10 \ Resize file
+ 11 : RESIZEF  ( ud handle  -- )  resize-file  6 ?ferror ;
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 7     KIMTAPE.SCR
+
+Scr# 18 
+  0 \ Default files -
+  1 create   INFILE   65 allot          \ filename buffer
+  2 variable INFID    infid off         \ file ID  0=closed
+  3 0 value  INBUF                      \ buffer
+  4 variable INPTR    variable INSIZ    \ pointer, chars in buffer
+  5 
+  6 create   OUTFILE  65 allot
+  7 variable OUTFID   outfid off
+  8 0 value  OUTBUF
+  9 variable OUTPTR   variable OUTSIZ
+ 10 
+ 11 variable WRTCHK   wrtchk on         \ file overwrite check
+ 12 
+ 13 : RESETINBUF  ( -- )  inbuf inptr !  insiz off ;
+ 14 : RESETOUTBUF  ( -- )  outbuf outptr !  outsiz off ;
+ 15 
+
+Scr# 19 
+  0 \ Default files - CLOSEINFILE CLOSEOUTFILE CLOSEFILES
+  1 defer (FLUSHWRITE)  ' 0    is (flushwrite)
+  2 
+  3 \ Close input file - errors not reported
+  4 : CLOSEINFILE  ( -- )  infid @ ?dup
+  5   if  close-file drop  then  infid off ;
+  6 
+  7 \ Close output file - errors not reported
+  8 : CLOSEOUTFILE  ( -- )  outfid @ ?dup
+  9   if  (flushwrite) drop  close-file drop  then  outfid off ;
+ 10 
+ 11 \ Close all files - errors not reported
+ 12 : CLOSEFILES  ( -- )  closeinfile  closeoutfile ;
+ 13 
+ 14 ' closefiles +defer errfix  \ close files on error
+ 15 
+
+Scr# 20 
+  0 \ Default files - DELOUTFILE REPOSIN/OUTFILE IN/OUTFILEPOS
+  1 \ Close and delete output file - errors not reported
+  2 : DELOUTFILE  ( -- )  outfid @  closeoutfile
+  3   if  outfile count delete-file drop  then ;
+  4 
+  5 \ Reposition input file to position d
+  6 : REPOSINFILE  ( ud -- )  infid @ reposf resetinbuf ;
+  7 
+  8 \ Reposition output file to position d
+  9 : REPOSOUTFILE  ( ud -- )  (flushwrite) drop  outfid @ reposf ;
+ 10 
+ 11 \ Input file position
+ 12 : INFILEPOS  ( -- ud )  infid @ fpos  insiz @  0 d- ;
+ 13 
+ 14 \ Output file position
+ 15 : OUTFILEPOS  ( -- ud )  outfid @ fpos  outsiz @  0 d+ ;
+
+Page 8     KIMTAPE.SCR
+
+Scr# 21 
+  0 \ Default files - OPENINFILE
+  1 \ Open an input file using file access mode fam
+  2 : OPENINFILE  ( fam -- )
+  3   infile count  2dup upper  cr ." infile:  "  2dup type
+  4   infid off  rot open-file  ?dup if  255 and
+  5     case
+  6       2  of  ."  file not found"  endof
+  7       3  of  ."  path not found"  endof
+  8       4  of  ."  too many open files"  endof
+  9       5  of  ."  access denied"  endof
+ 10       ."  open error"
+ 11     endcase  error2
+ 12   then  infid !  resetinbuf ;
+ 13 
+ 14 
+ 15 
+
+Scr# 22 
+  0 \ Default files - OPENOUTFILE
+  1 \ Create an output file using file access mode fam
+  2 : OPENOUTFILE  ( fam -- )
+  3   outfile count  2dup upper  cr ." outfile: "  2dup type
+  4   outfid off  wrtchk @ if
+  5     2dup r/o open-file  0= if
+  6       close-file
+  7       beep ."  exists - overwrite? "  y/n 0= if error2 then
+  8     then  drop
+  9   then
+ 10   rot create-file if  ."  create error"  error2  then
+ 11   outfid !  resetoutbuf ;
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 23 
+  0 \ Default files - READDATA WRITEDATA READTEXT WRITETEXT
+  1 \ Read binary from input file
+  2 : READDATA  ( a u1 -- a u2 )  infid @ readf ;
+  3 
+  4 \ Write binary to output file
+  5 : WRITEDATA  ( a u -- )  outfid @ writef ;
+  6 
+  7 \ Read text from input file  flag=0 if end-of-file
+  8 : READTEXT  ( a u1 -- a u2 flag )  infid @ readl ;
+  9 
+ 10 \ Write text to output file
+ 11 : WRITETEXT  ( a u -- )  outfid @ writel ;
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 9     KIMTAPE.SCR
+
+Scr# 24 
+  0 \ Buffered input file - REFILLREAD READCHAR
+  1 here to INBUF  1024 allot  resetinbuf
+  2 
+  3 \ Refill read buffer
+  4 : REFILLREAD  ( -- )
+  5   resetinbuf  inbuf 1024 readdata  insiz !  drop ;
+  6 
+  7 \ Read char from buffered input file
+  8 \ : READCHAR  ( -- char -1 | 0 )  insiz @ 0= if refillread then
+  9 \  insiz @ if inptr @ c@ 1 inptr +! -1 insiz +! -1 else 0 then ;
+ 10 
+ 11 code READCHAR  ( -- char -1 | 0 )  0 # insiz ) cmp
+ 12   1 l# jnz  c: refillread ;c  1 L:  ax ax sub  ax insiz ) cmp
+ 13   2 l# jz  inptr ) bx mov  0 [bx] al mov  ax push  inptr ) inc
+ 14   insiz ) dec  -1 # ax mov  2 L: 1push end-code
+ 15 
+
+Scr# 25 
+  0 \ Buffered output file - FLUSHWRITE WRITECHAR
+  1 here to OUTBUF  1024 allot  resetoutbuf
+  2 
+  3 \ Flush write buffer
+  4 :noname  ( -- ior )  outbuf  outsiz @  outfid @  write-file
+  5   resetoutbuf ;  is (flushwrite)
+  6 
+  7 : FLUSHWRITE  ( -- )  (flushwrite)  4 ?ferror ;
+  8 
+  9 \ Write char to buffered output file
+ 10 \ : WRITECHAR  ( char -- )  outsiz @ 1024 = if flushwrite then
+ 11 \  outptr @ c! 1 outptr +! 1 outsiz +! ;
+ 12 
+ 13 code WRITECHAR  ( char -- )  1024 # outsiz ) cmp
+ 14   1 l# jnz  c: flushwrite ;c  1 L:  ax pop  outptr ) bx mov
+ 15   al 0 [bx] mov  outptr ) inc  outsiz ) inc  next  end-code
+
+Scr# 26 
+  0 
+  1 
+  2 
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 10    KIMTAPE.SCR
+
+Scr# 27 
+  0 
+  1 
+  2 
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 28 
+  0 
+  1 
+  2 
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 29 
+  0 
+  1 
+  2 
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 11    KIMTAPE.SCR
+
+Scr# 30 
+  0 \ Help screen - HELP
+  1 : HELP  ( -- )
+  2   cr ." Use:  KIMTAPE [options] infile[.typ] [outfile[.typ]]" cr
+  3   cr ." -C    console output              -M    make wavefile"
+  4   cr ." -Bn   HYPERTAPE speed  2x 3x 6x   -I    invert wavefile"
+  5   cr ." -U    SYM-1 high speed format     -V    VOC wavefile"
+  6   cr ." -Fn   offset  -127 to 127         -R    RAW wavefile"
+  7   cr ." -Hn   hysteresis  0 to 127        -Ln   leader (sec)"
+  8   cr ." -Gn   timing  -2 to 2             -T    sine tone"
+  9   cr ." -An   load address (hex)          -Dn   prog ID (hex)"
+ 10   cr
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 31 
+  0 \ Help screen - HELP
+  1   cr ." default: decode WAV file, KIM-1 format"
+  2   cr ."          load address=0200, file ID=00"
+  3   cr
+  4   cr ." Conversion utility for KIM-1 and SYM-1 format audio"
+  5   cr ." tapes. Input/output is an 8-bit mono WAV, VOC or RAW"
+  6   cr ." wavefile recorded at 22,050 samples per second."
+  7   error1 ;
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 32 
+  0 \ Misc
+  1 : M+!  ( n a -- )  dup >r  2@  rot m+  r> 2! ;
+  2 
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 12    KIMTAPE.SCR
+
+Scr# 33 
+  0 \ Variables -
+  1 variable SADDR              \ start address
+  2 variable EADDR              \ end address +1
+  3 variable BITCOUNT           \ bit counter
+  4 variable CHECKSUM           \ checksum
+  5 variable CONOUT             \ console flag
+  6 variable DECODING           \ 0=encode nz=decode
+  7 variable FILEID             \ file ID
+  8 variable POLARITY           \ wave polarity  0=normal nz=invert
+  9 variable LASTCYCLE          \ last cycle weight
+ 10 variable LEADTIME           \ leader (secs)
+ 11 variable SAMPLECOUNT        \ sample count
+ 12 variable SPEED              \ speed
+ 13 variable MODE               \ mode flag  0=KIM nz=SYM
+ 14 variable SINE               \ tone type
+ 15 variable WAVE               \ wave type
+
+Scr# 34 
+  0 \ Variables -
+  1 2variable DECODECOUNT       \ bytes decoded
+  2 2variable WAVESIZ           \ wavefile data size
+  3 
+  4 4  constant EOT             \ Ascii end of text character
+  5 22 constant SYNC            \ Ascii sync character
+  6 
+  7 0   value BIAS              \ waveform DC offset adjust
+  8 8   value DATABITS          \ character length
+  9 3   value HYSTERESIS        \ hysteresis level
+ 10 7   value MAXWAVE           \ max sample for high tone
+ 11 130 value SILENCEMAX        \ upper hysteresis level
+ 12 124 value SILENCEMIN        \ lower hysteresis level
+ 13 
+ 14 
+ 15 
+
+Scr# 35 
+  0 \ SETLEVELS WAVETYPE
+  1 \ Set waveform trigger levels
+  2 : SETLEVELS  ( -- )
+  3   1275  hysteresis 10 *  2dup
+  4   - 10 / bias +  0 max 255 min  to silencemin
+  5   + 10 / bias +  0 max 255 min  to silencemax ;
+  6 
+  7 \ Get default wavefile type
+  8 : WAVETYPE  ( -- a u )
+  9   wave @  case
+ 10     0  of  s" WAV"  endof
+ 11     1  of  s" VOC"  endof
+ 12     2  of  s" RAW"  endof
+ 13   endcase ;
+ 14 
+ 15 
+
+Page 13    KIMTAPE.SCR
+
+Scr# 36 
+  0 \ FLIP-POLARITY SYM?
+  1 \ Invert polarity flag
+  2 : FLIP-POLARITY  ( -- )
+  3   polarity @  0=  polarity ! ;
+  4 
+  5 \ SYM mode test
+  6 : SYM?  ( -- flag )
+  7   mode @ ;
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 37 
+  0 \ (SETOPTION)
+  1 \ Set options
+  2 : (SETOPTION)  ( a u char -- a u )
+  3   upcase case
+  4     [char] A  of  /hexnum  saddr !  endof
+  5     [char] B  of  2 6 /numrange  speed !  endof
+  6     [char] C  of  conout on  endof
+  7     [char] D  of  /hexnum  fileid !  endof
+  8     [char] F  of  -127 127 /numrange to bias  setlevels  endof
+  9     [char] G  of  -2 2 /numrange  maxwave +  to maxwave  endof
+ 10     [char] H  of  0 127 /numrange to hysteresis setlevels  endof
+ 11     [char] I  of  polarity on  endof
+ 12     [char] L  of  /num  leadtime !  endof
+ 13     [char] M  of  decoding off  endof
+ 14     [char] R  of  2 wave !  endof
+ 15     [char] T  of  1 sine !  endof
+
+Scr# 38 
+  0 \ (SETOPTION)
+  1     [char] U  of  mode on  endof
+  2     [char] V  of  1 wave !  endof
+  3     badoption  endcase ;
+  4 
+  5 ' (setoption) is setoption
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 14    KIMTAPE.SCR
+
+Scr# 39 
+  0 \ (PARSEFILENAME)
+  1 \ Parse filenames
+  2 : (PARSEFILENAME)  ( -- )
+  3   argv  0= if  help  then
+  4   decoding @ if  wavetype  else  s" PRG"  then
+  5   +filename  64 min  infile place
+  6   argv  0= if  infile count  -path -filename  then
+  7   decoding @ if  s" PRG"  else  wavetype  then
+  8   +filename  64 min  outfile place ;
+  9 
+ 10 ' (parsefilename) is parsefilename
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 40 
+  0 \ STR WAV-HDR VOC-HDR
+  1 \ Define n character string header
+  2 -? : STR  create ( n -- ) c,  does> ( -- a u ) count ;
+  3 
+  4 hex
+  5 2C str WAV-HDR  ( WAV header )
+  6 4952 , 4646 , 0000 , 0000 , 4157 , 4556 , 6D66 , 2074 ,
+  7 0010 , 0000 , 0001 , 0001 , 5622 , 0000 , 5622 , 0000 ,
+  8 0001 , 0008 , 6164 , 6174 , 0000 , 0000 ,
+  9 
+ 10 20 str VOC-HDR  ( VOC header )
+ 11 7243 , 6165 , 6974 , 6576 , 5620 , 696F , 6563 , 4620 ,
+ 12 6C69 , 1A65 , 001A , 010A , 1129 , 0001 , 0000 , 00D3 ,
+ 13 decimal
+ 14 
+ 15 
+
+Scr# 41 
+  0 \ 0BIT-SQR-KIM 1BIT-SQR-KIM
+  1 hex
+  2 9 str 0BIT-SQR-KIM  ( 1 1/2 cycle 3600 hz - square equalized )
+  3 ( normal )
+  4 DC8C , 73FF , 0023 , DC8C , FF c,
+  5 ( inverted )
+  6 2373 , 8C00 , FFDC , 2373 , 00 c,
+  7 
+  8 9 str 1BIT-SQR-KIM  ( 1 cycle 2400 hz - square equalized )
+  9 ( normal )
+ 10 DC9D , FFF5 , 5597 , 112B , 00 c,
+ 11 ( inverted )
+ 12 2362 , 000A , AA68 , EED4 , FF c,
+ 13 decimal
+ 14 
+ 15 
+
+Page 15    KIMTAPE.SCR
+
+Scr# 42 
+  0 \ 0BIT-SIN-KIM 1BIT-SIN-KIM
+  1 hex
+  2 9 str 0BIT-SIN-KIM  ( 1 1/2 cycle 3600 hz - sine )
+  3 ( normal )
+  4 FFBE , 41BE , 4100 , FFBE , BE c,
+  5 ( inverted )
+  6 0041 , BE41 , BEFF , 0041 , 41 c,
+  7 
+  8 9 str 1BIT-SIN-KIM  ( 1 cycle 2400 hz - sine )
+  9 ( normal )
+ 10 FED2 , ACEF , 1154 , 2E02 , 80 c,
+ 11 ( inverted )
+ 12 012D , 5310 , EEAB , D1FD , 7F c,
+ 13 decimal
+ 14 
+ 15 
+
+Scr# 43 
+  0 \ 0BIT-SQR-SYM 1BIT-SQR-SYM
+  1 hex
+  2 10 str 0BIT-SQR-SYM  ( 1/2 cycle 700 hz - square equalized )
+  3 ( normal )
+  4 C79F , EEDE , FFF8 , FFFF , FFFF , FFFF , FFFF , FFFF ,
+  5 ( inverted )
+  6 3960 , 1121 , 0007 , 0000 , 0000 , 0000 , 0000 , 0000 ,
+  7 
+  8 10 str 1BIT-SQR-SYM  ( 1 cycle 1400 hz - square equalized )
+  9 ( normal )
+ 10 C79F , EEDE , FFF8 , 3960 , 1121 , 0007 , 0000 , 0000 ,
+ 11 ( inverted )
+ 12 3960 , 1121 , 0007 , C79F , EEDE , FFF8 , FFFF , FFFF ,
+ 13 decimal
+ 14 
+ 15 
+
+Scr# 44 
+  0 \ 0BIT-SIN-SYM 1BIT-SIN-SYM
+  1 hex
+  2 10 str 0BIT-SIN-SYM  ( 1/2 cycle 700 hz - sine )
+  3 ( normal )
+  4 AE97 , D5C3 , F2E5 , FFFA , FAFF , E5F2 , C3D5 , 97AE ,
+  5 ( inverted )
+  6 5168 , 2A3C , 0D1A , 0005 , 0500 , 1A0D , 3C2A , 6851 ,
+  7 
+  8 10 str 1BIT-SIN-SYM  ( 1 cycle 1400 hz - sine )
+  9 ( normal )
+ 10 E3B7 , FCFC , B7E3 , 3A5B , 0B1F , 0101 , 1F0B , 5B3A ,
+ 11 ( inverted )
+ 12 1C48 , 0303 , 481C , C5A4 , F4E0 , FEFE , E0F4 , A4C5 ,
+ 13 decimal
+ 14 
+ 15 
+
+Page 16    KIMTAPE.SCR
+
+Scr# 45 
+  0 \ 0BIT-SQR 1BIT-SQR 0BIT-SIN 1BIT-SIN SENDBIT
+  1 \ Bit data
+  2 defer 0BIT-SQR  ( a u -- )
+  3 defer 1BIT-SQR  ( a u -- )
+  4 defer 0BIT-SIN  ( a u -- )
+  5 defer 1BIT-SIN  ( a u -- )
+  6 
+  7 \ Send bit data to output
+  8 : SENDBIT  ( a u -- )
+  9   polarity @ if
+ 10     swap over + swap  ( index to inverted bit data )
+ 11   then
+ 12   dup wavesiz m+!  writedata ;
+ 13 
+ 14 
+ 15 
+
+Scr# 46 
+  0 \ PACEBIT LEADER
+  1 hex
+  2 9 str PACEBIT  ( leader tone - 0 hz )
+  3 ( normal )
+  4 8080 , 8080 , 8080 , 8080 , 80 c,
+  5 ( inverted )
+  6 8080 , 8080 , 8080 , 8080 , 80 c,
+  7 decimal
+  8 
+  9 \ Write leader
+ 10 : LEADER  ( -- )
+ 11   leadtime @  408 *  0 ?do
+ 12     6 0 do  pacebit sendbit  loop
+ 13   loop ;
+ 14 
+ 15 
+
+Scr# 47 
+  0 \ HIGHTONE LOWTONE
+  1 \ Send high tone
+  2 : HIGHTONE  ( -- )
+  3   6  speed @  /  0 do
+  4     sine @ if  0bit-sin  else  0bit-sqr  then  sendbit
+  5     flip-polarity
+  6   loop ;
+  7 
+  8 \ Send low tone
+  9 : LOWTONE  ( -- )
+ 10   6  speed @  /  0 do
+ 11     sine @ if  1bit-sin  else  1bit-sqr  then  sendbit
+ 12   loop ;
+ 13 
+ 14 
+ 15 
+
+Page 17    KIMTAPE.SCR
+
+Scr# 48 
+  0 \ 0BIT-KIM 1BIT-KIM 0BIT-SYM 1BIT-SYM
+  1 \ Send 0-bit
+  2 : 0BIT-KIM  ( -- )  hightone hightone lowtone ;
+  3 
+  4 \ Send 1-bit
+  5 : 1BIT-KIM  ( -- )  hightone lowtone lowtone ;
+  6 
+  7 \ Send 0-bit
+  8 : 0BIT-SYM  ( -- )
+  9   sine @ if  0bit-sin-sym  else  0bit-sqr-sym  then  sendbit
+ 10   flip-polarity ;
+ 11 
+ 12 \ Send 1-bit
+ 13 : 1BIT-SYM  ( -- )
+ 14   sine @ if  1bit-sin-sym  else  1bit-sqr-sym  then  sendbit ;
+ 15 
+
+Scr# 49 
+  0 \ 0BIT 1BIT SENDBYTE
+  1 defer 0BIT  ( -- )      \ send 0 bit
+  2 defer 1BIT  ( -- )      \ send 1 bit
+  3 
+  4 \ Send character
+  5 : SENDBYTE  ( char -- )
+  6   sym? if  0bit  then  ( send start bit )
+  7   0 swap  databits 0 do
+  8     2 /mod
+  9     swap if
+ 10       1bit  swap 1+ swap
+ 11     else
+ 12       0bit
+ 13     then
+ 14   loop 2drop ;
+ 15 
+
+Scr# 50 
+  0 \ STARTWAVE !SIZE
+  1 \ Write header, leader
+  2 : STARTWAVE  ( -- )
+  3   0. wavesiz 2!
+  4   wave @  case
+  5     0  of  wav-hdr writedata  endof
+  6     1  of  voc-hdr writedata  endof
+  7     endcase
+  8   leader ;
+  9 
+ 10 \ Patch WAV/VOC data size
+ 11 : !SIZE  ( u -- )
+ 12   wavesiz 2@  swap  pad 2!  pad swap writedata ;
+ 13 
+ 14 
+ 15 
+
+Page 18    KIMTAPE.SCR
+
+Scr# 51 
+  0 \ ENDWAVE
+  1 \ Write leader, patch in size
+  2 : ENDWAVE  ( -- )
+  3   leader
+  4   wave @  case
+  5     0  of  0 pad c!  pad 1 writedata
+  6            40. outfid @  reposf  4 !size
+  7            4.  outfid @  reposf
+  8            36 wavesiz m+!  4 !size  endof
+  9     1  of  0 pad c!  pad 1 writedata
+ 10            27. outfid @  reposf
+ 11            2  wavesiz m+!  3 !size  endof
+ 12     endcase ;
+ 13 
+ 14 
+ 15 
+
+Scr# 52 
+  0 \ +CHECKSUM !BYTE !WORD
+  1 \ Add to checksum
+  2 : +CHECKSUM  ( byte -- byte )
+  3   255 and  dup checksum +! ;
+  4 
+  5 \ Write byte to file, bump checksum
+  6 : !BYTE  ( u -- )
+  7   +checksum  sendbyte ;
+  8 
+  9 \ Write word (lo-hi) to file
+ 10 : !WORD  ( u -- )
+ 11   0  256 um/mod  swap !byte  !byte ;
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 53 
+  0 \ !ASCBYTE !ASCWORD
+  1 \ Write ascii hex byte to file, bump checksum
+  2 : !ASCBYTE  ( u -- )
+  3   +checksum
+  4   16 /mod  ( split into nibbles )
+  5   2 0 do
+  6     dup 9 >  if 7 + then
+  7     [char] 0 +  sendbyte
+  8   loop ;
+  9 
+ 10 \ Write ascii hex word (lo-hi) to file
+ 11 : !ASCWORD  ( u -- )
+ 12   0  256 um/mod  swap !ascbyte  !ascbyte ;
+ 13 
+ 14 
+ 15 
+
+Page 19    KIMTAPE.SCR
+
+Scr# 54 
+  0 \ !DATABYTE SENDID
+  1 \ Write data byte to file, bump checksum
+  2 : !DATABYTE  ( u -- )
+  3   sym? if  !byte  else  !ascbyte  then ;
+  4 
+  5 \ Send file ID
+  6 : SENDID  ( -- )
+  7   fileid @  !databyte ;
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 55 
+  0 \ SENDADDRESS SENDCHECKSUM
+  1 \ Send address
+  2 : SENDADDRESS  ( -- )
+  3   saddr @
+  4   sym? if
+  5     !word  eaddr @  !word
+  6   else
+  7     !ascword
+  8   then ;
+  9 
+ 10 \ Send checksum
+ 11 : SENDCHECKSUM  ( -- )
+ 12   [char] / sendbyte
+ 13   checksum @
+ 14   sym? if  !word  else  !ascword  then ;
+ 15 
+
+Scr# 56 
+  0 \ SENDDATA SENDPREAMBLE SENDPOSTAMBLE
+  1 \ Send program data
+  2 : SENDDATA  ( -- )
+  3   begin
+  4     readchar
+  5   while ( not end )
+  6     !databyte
+  7   repeat ;
+  8 
+  9 \ Send SYNC string and start character
+ 10 : SENDPREAMBLE  ( -- )  100  sym? if  10 *  then
+ 11   0 do  sync sendbyte  loop  [char] *  sendbyte ;
+ 12 
+ 13 \ Send EOT string
+ 14 : SENDPOSTAMBLE  ( -- )
+ 15   eot sendbyte  eot sendbyte ;
+
+Page 20    KIMTAPE.SCR
+
+Scr# 57 
+  0 \ SETENDADDR
+  1 \ Set end address according to input filesize
+  2 : SETENDADDR  ( -- )
+  3   infid @ fsize  ( get input file size )
+  4   saddr @ 0 d+   ( add startaddr )
+  5   2dup $10001. du< not  if ( too high )
+  6     cr ." End address exceeds $FFFF"  error2
+  7   then
+  8   drop  eaddr ! ;
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 58 
+  0 \ ENCODE
+  1 \ Convert program file to wave
+  2 : ENCODE  ( -- )
+  3   setendaddr
+  4   startwave
+  5   sendpreamble
+  6   sendid
+  7   0 checksum !
+  8   sendaddress
+  9   senddata
+ 10   sendchecksum
+ 11   sendpostamble
+ 12   endwave ;
+ 13 
+ 14 
+ 15 
+
+Scr# 59 
+  0 \ .DECODED .POSITION
+  1 \ Display decoded program details
+  2 : .DECODED  ( -- )
+  3   cr ." Program "  fileid @ hb.
+  4   ."  address " saddr @  h.  mode @ if  eaddr @ 1- h.  then
+  5   ."  checksum " checksum @ if ." ERROR"  else ." OK" then
+  6   2 spaces  decodecount 2@  ud. ." bytes" ;
+  7 
+  8 \ Show position at which error occured
+  9 : .POSITION  ( -- )
+ 10   ."  at position " infilepos ud.  .decoded  error2 ;
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 21    KIMTAPE.SCR
+
+Scr# 60 
+  0 \ BADPATTERN MISSING
+  1 \ Bad pattern error
+  2 : BADPATTERN  ( -- )
+  3   cr ." Bad pattern error" .position ;
+  4 
+  5 \ Item missing error
+  6 : MISSING  ( a u -- )
+  7   cr ." Missing " type .position ;
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 61 
+  0 \ SAMPLE SEEK+ SEEK- SEEKHALF
+  1 \ Get sample
+  2 : SAMPLE  ( -- char )
+  3   readchar 0= 1 ?throw  1 samplecount +! ;
+  4 
+  5 \ Seek +ve going edge
+  6 : SEEK+  ( -- )  begin  sample  silencemax >  until ;
+  7 
+  8 \ Seek -ve going edge
+  9 : SEEK-  ( -- )  begin  sample  silencemin <  until ;
+ 10 
+ 11 \ Seek half cycle
+ 12 : SEEKHALF  ( -- samples )
+ 13   samplecount off
+ 14   polarity @ if  seek+  else  seek-  then  samplecount @
+ 15   flip-polarity ;
+
+Scr# 62 
+  0 \ SEEKWHOLE GETTONE GETTONE-KIM GETTONE-SYM
+  1 \ Seek whole cycle
+  2 : SEEKWHOLE  ( -- samples )
+  3   seekhalf seekhalf + ;
+  4 
+  5 \ Get basic element  true = high tone
+  6 defer GETTONE  ( -- flag )
+  7 
+  8 \ For KIM get whole cycle  true = high tone
+  9 : GETTONE-KIM  ( -- flag )
+ 10   seekwhole  maxwave > not ;
+ 11 
+ 12 \ For SYM get half cycle  true = high tone
+ 13 : GETTONE-SYM  ( -- flag )
+ 14   seekhalf  3 - maxwave > not ;
+ 15 
+
+Page 22    KIMTAPE.SCR
+
+Scr# 63 
+  0 \ GETBIT-KIM
+  1 \ Get next bit
+  2 : GETBIT-KIM  ( -- bit )
+  3   0 begin
+  4     lastcycle @  dup >r  +  ( sum weights )
+  5     3  ( new weight )
+  6     gettone if  ( high tone )
+  7       negate
+  8       seekhalf drop  ( discard next half cycle )
+  9     then
+ 10     dup lastcycle !
+ 11     r> <  ( compare last with new )
+ 12   until   ( start of new bit )
+ 13   0> abs ;
+ 14 
+ 15 
+
+Scr# 64 
+  0 \ GETBIT-SYM
+  1 \ Get next bit
+  2 : GETBIT-SYM  ( -- bit )
+  3   0
+  4   gettone if  ( high tone )
+  5     1+
+  6     seekhalf drop  ( discard next halfcycle )
+  7   then ;
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 65 
+  0 \ GETBIT ?EMIT DECODEBYTE -DECODEBYTE
+  1 \ Get next bit
+  2 defer  GETBIT  ( -- bit )
+  3 
+  4 \ Write char to console
+  5 : ?EMIT ( char -- )  conout @ if  emit  else  drop  then ;
+  6 
+  7 \ Decode next byte
+  8 : DECODEBYTE  ( -- byt )
+  9   sym? if  seekhalf drop  then  ( discard start bit )
+ 10   0  databits 0 do  1 rshift  getbit  7 lshift  or  loop
+ 11   dup ?emit ;
+ 12 
+ 13 \ Decode next byte ignoring EOF
+ 14 : -DECODEBYTE  ( -- byt )
+ 15   ['] decodebyte 1 ?catch if  256 ( dummy )  then ;
+
+Page 23    KIMTAPE.SCR
+
+Scr# 66 
+  0 \ SYNCHRONIZE FINDSYNC
+  1 \ Scan bitstream for sync character
+  2 : SYNCHRONIZE  ( -- )
+  3   0 begin
+  4     1 rshift  getbit  7 lshift  or  dup sync =
+  5   until  ?emit ;
+  6 
+  7 \ Find 10 consecutive sync characters
+  8 : FINDSYNC ( -- )
+  9   synchronize
+ 10   9 begin
+ 11     decodebyte  sync = if  1-  else  drop
+ 12       flip-polarity  ( try changing polarity )
+ 13       synchronize  9  then
+ 14     ?dup 0=
+ 15   until ;
+
+Scr# 67 
+  0 \ FINDPREAMBLE
+  1 \ Find preamble
+  2 : FINDPREAMBLE  ( -- )
+  3   begin
+  4     findsync
+  5     begin
+  6       decodebyte
+  7       dup sync <>  and ?dup  ( skip sync char )
+  8     until
+  9     [char] * =  ( scan start char )
+ 10   until ;
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 68 
+  0 \ @BYTE @WORD
+  1 \ Read hex ascii byte, bump checksum
+  2 : @BYTE  ( -- u )
+  3   decodebyte +checksum ;
+  4 
+  5 \ Read hex ascii word
+  6 : @WORD  ( -- u )
+  7   @byte  @byte  256 *  + ;
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 24    KIMTAPE.SCR
+
+Scr# 69 
+  0 \ HEXCHAR @ASCBYTE @ASCWORD
+  1 \ Accumulate hex char to u1
+  2 : HEXCHAR  ( u1 char -- u2 )
+  3   dup [char] 0  < if badpattern then
+  4   dup [char] 9  > if
+  5   dup [char] A  < if badpattern then
+  6   dup [char] F  > if badpattern then  7 -
+  7   then  15 and  swap  16 *  + ;
+  8 
+  9 \ Read hex ascii byte, bump checksum
+ 10 : @ASCBYTE  ( -- u )
+ 11   0  decodebyte hexchar  decodebyte hexchar  +checksum ;
+ 12 
+ 13 \ Read hex ascii word
+ 14 : @ASCWORD  ( -- u )
+ 15   @ascbyte  @ascbyte  256 *  + ;
+
+Scr# 70 
+  0 \ GETID GETADDRESS
+  1 \ Get program ID
+  2 : GETID  ( -- )
+  3   sym? if  @byte  else  @ascbyte  then  fileid ! ;
+  4 
+  5 \ Get start/end address
+  6 : GETADDRESS  ( -- )
+  7   sym? if
+  8     @word saddr !
+  9     @word eaddr !
+ 10   else
+ 11     @ascword saddr !
+ 12   then ;
+ 13 
+ 14 
+ 15 
+
+Scr# 71 
+  0 \ GETCHECKSUM GETEND
+  1 \ Get checksum
+  2 : GETCHECKSUM  ( -- )
+  3   checksum @
+  4   sym? if  @word  else  @ascword  then
+  5   -  checksum ! ;
+  6 
+  7 \ Get end of text characters
+  8 \ For KIM/SYM compatibility, EOT chars are ignored
+  9 : GETEND  ( -- )
+ 10   -decodebyte drop  -decodebyte drop ;
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 25    KIMTAPE.SCR
+
+Scr# 72 
+  0 \ GETDATABYTE
+  1 \ Get data byte
+  2 : GETDATABYTE  ( -- byte flag )
+  3   sym? if
+  4     decodecount 2@ drop  saddr @ +  eaddr @ = if
+  5       decodebyte  dup [char] /  <> if  s" /" missing  then
+  6       false  exit  then
+  7     decodebyte
+  8   else
+  9     decodebyte
+ 10     dup [char] /  = if  false  exit  then
+ 11     0 swap hexchar  decodebyte hexchar  ( form byte )
+ 12   then
+ 13   true ;
+ 14 
+ 15 
+
+Scr# 73 
+  0 \ GETDATA SKIPHEADER
+  1 \ Get program data
+  2 : GETDATA  ( -- )
+  3   0. decodecount 2!
+  4   begin
+  5     getdatabyte
+  6   while ( not end )
+  7     +checksum
+  8     conout @ if  drop  else  writechar  then
+  9     1 decodecount m+!
+ 10   repeat drop ;
+ 11 
+ 12 \ Skip WAV/VOC header
+ 13 : SKIPHEADER  ( -- )
+ 14   64 0 do  readchar if  drop  else  leave  then  loop ;
+ 15 
+
+Scr# 74 
+  0 \ DECODE
+  1 \ Convert wave file to program
+  2 : DECODE  ( -- )
+  3   skipheader
+  4   begin
+  5     ['] findpreamble  1 ?catch 0=
+  6   while  ( program found )
+  7     0. decodecount 2!
+  8     ['] getid        1 ?catch if s" ID" missing then
+  9     0 checksum !
+ 10     ['] getaddress   1 ?catch if s" address" missing then
+ 11     ['] getdata      1 ?catch if s" data" missing then
+ 12     ['] getchecksum  1 ?catch if s" checksum" missing then
+ 13     getend  .decoded
+ 14   repeat ;
+ 15 
+
+Page 26    KIMTAPE.SCR
+
+Scr# 75 
+  0 \ SETMODE
+  1 \ Select KIM or SYM mode
+  2 : SETMODE  ( -- )
+  3   sym? if
+  4     ['] 0bit-sqr-sym is 0bit-sqr  ['] 1bit-sqr-sym is 1bit-sqr
+  5     ['] 0bit-sin-sym is 0bit-sin  ['] 1bit-sin-sym is 1bit-sin
+  6     ['] 0bit-sym is 0bit          ['] 1bit-sym is 1bit
+  7     ['] gettone-sym is gettone    ['] getbit-sym is getbit
+  8   else
+  9     ['] 0bit-sqr-kim is 0bit-sqr  ['] 1bit-sqr-kim is 1bit-sqr
+ 10     ['] 0bit-sin-kim is 0bit-sin  ['] 1bit-sin-kim is 1bit-sin
+ 11     ['] 0bit-kim is 0bit          ['] 1bit-kim is 1bit
+ 12     ['] gettone-kim is gettone    ['] getbit-kim is getbit
+ 13   then ;
+ 14 
+ 15 
+
+Scr# 76 
+  0 \ (RUN)
+  1 \ Run application
+  2 : (RUN)  ( -- )
+  3   setmode
+  4   r/o openinfile
+  5   decoding @ if
+  6     conout @ 0= if  r/w openoutfile  then
+  7     cr decode
+  8   else
+  9     r/w openoutfile
+ 10     cr encode
+ 11   then
+ 12   closefiles
+ 13   ;
+ 14 
+ 15 
+
+Scr# 77 
+  0 \ DEFAULTS
+  1 \ Set defaults
+  2 : DEFAULTS  ( -- )
+  3   mode off  decoding on  conout off  1 speed !  5 leadtime !
+  4   wave off  sine off  polarity off  fileid off  $200 saddr ! ;
+  5 
+  6 defaults
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Page 27    KIMTAPE.SCR
+
+Scr# 78 
+  0 \ RUN PROGRAM
+  1 \ Run application with error handling
+  2 : RUN  ( -- )
+  3   ['] (run) catch ?dup if ( err# ) errfix  throw  then ;
+  4 
+  5 \ Main
+  6 : PROGRAM  ( -- )
+  7   set-io                \ set console method
+  8   cr title              \ show program name
+  9   defaults              \ set defaults
+ 10   parsecmd              \ get options/filenames
+ 11   run                   \ run application
+ 12   cr ." done"           \ show success
+ 13   ;
+ 14 
+ 15 
+
+Scr# 79 
+  0 
+  1 
+  2 
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+
+Scr# 0 
+  0 \ Information
+  1 
+  2 Conversion utility for KIM-1 and SYM-1 format tapes.
+  3 
+  4 
+  5 
+  6 
+  7 
+  8 
+  9 
+ 10 
+ 11 
+ 12 
+ 13 
+ 14 
+ 15 
+

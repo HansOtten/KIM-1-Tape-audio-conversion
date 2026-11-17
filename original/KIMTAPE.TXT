@@ -1,0 +1,186 @@
+KIMTAPE - A KIM-1 Tape Conversion Utility
+
+Similar to the KCS utility for Kansas City Standard tapes, KIMTAPE
+allows programs stored on cassette tape to be decoded to a program
+file. It handles both MOS Technology KIM-1 and Synertek SYM-1 tape
+formats including HYPERTAPE. The reverse process - converting a
+program file to an audio wavefile is also possible, allowing one
+to produce perfectly regenerated cassettes. KIMTAPE works with
+8-bit mono WAV, VOC or RAW audio files recorded at 22050 samples
+per second.
+
+
+NOTES
+
+1. Decoding
+
+ a) The audio file MUST be an 8-bit mono file recorded at 22050
+    samples per second. Any other format will result in failure.
+
+ b) Though the decoder will handle a wide range of input levels,
+    it is best to sample the audio source at moderate to high
+    levels. Slight clipping should not cause any problems.
+
+ c) It is not necessary to specify speed when decoding. HYPERTAPE
+    speeds are automatically handled. To read SYM-1 high speed
+    format, the SYM-1 mode must be enabled (switch -U).
+
+ d) Decoding begins with the first sync found and continues until
+    the end of the file or an error occurs. If there is more than
+    one program present on a wavefile, the programs will be
+    concatenated. The output file will contain program data in
+    binary form. Should you wish to view the program in the form
+    actually stored on tape then use the -C switch (it can be
+    saved to a disk file using DOS redirection if desired).
+
+ e) If nothing is decoded, it may be due to a variety of causes.
+
+    - not 8-bit mono wavefile recorded at 22050 samples/sec
+    - not KIM-1, HYPERTAPE or SYM-1 format data
+    - incorrect mode (default is KIM-1)
+    - very low recording level
+    - wavefile has very poor waveshape, excessive DC offset or
+      phase shift
+
+ f) DC offset, hysteresis and timing controls (-F -H -G)
+
+    Wavefiles having a very poor waveshape may give rise to
+    "bad pattern" errors. This can be due to head mis-
+    alignment between the cassette record and playback
+    devices. Such problems can sometimes be compensated for
+    by the judicious use of the DC offset and hysteresis
+    controls (-F -H). The default values are 0 and 3
+    respectively.
+
+    Speed difference between tape record and playback devices
+    can also result in decoding failure. The timing control
+    (-G) can be used to compensate. The default value is 0.
+
+ g) Playback device
+
+    If the tape playback device has any tone controls, these
+    should be set for a 'flat' frequency response.
+
+    Avoid portable cassette recorders of the "ghetto blaster"
+    variety as these often have bass and treble boost which
+    can introduce excessive phase shift and affect decoding.
+    Experimenting with the tone or treble controls may help.
+
+    A hi-fi stereo cassette deck should work well, but sample
+    from one channel only.
+
+2. Encoding
+
+ a) The default tone used is a shaped square wave and results in
+    an optimum waveform when played back from a cassette. A sine
+    wave option is provided (-T switch) however it is likely to
+    be less effective, particularly at the higher baud rates.
+
+ b) It should not be necessary to use the waveform invert option
+    (-I switch). Most computers should handle waveforms of either
+    polarity.
+
+ c) The encoded wavefile can be stored very effectively using
+    any file archiving program such as PKZIP, ARJ, WinZIP etc.
+    Archived wavefiles are typically 1% of their original size.
+
+
+3. High speed formats
+
+   The KIM-1 saved programs to tape at a relatively low speed.
+   A popular speedup utility, HYPERTAPE, allowed users to save at
+   speeds of 2x, 3x or 6x. Tapes written using HYPERTAPE could be
+   read on any KIM-1 without modification. However many users
+   found 6x speed to be unreliable so 3x speed was often the
+   practical maximum.
+
+   The SYM-1 offered two save modes - a low speed KIM-1 (1x)
+   compatible mode and a SYM-1 high speed mode (approx 18x).
+
+   Note: Unless special software is provided, tapes recorded in
+   SYM-1 high speed mode cannot be read on a KIM-1.  Similarly,
+   tapes recorded in HYPERTAPE mode (2x 3x 6x) cannot be read on
+   a SYM-1.
+
+
+4. Phase distortion issues
+
+   All audio cassette players include 120 uS tape equalization
+   during replay - a side effect of which is the creation of
+   phase distortion. While this is inaudible to the ear, it can
+   affect computer program data. To counter this, many computer
+   cassette interfaces included phase precompensation in the
+   audio output circuitry.
+
+   The KIM-1 however did not include phase precompensation. The
+   reason why this did not adversely affect performance was
+   twofold 1) very low baud rate and 2) a phase-locked loop was
+   used for decoding which is relatively insensitive to phase
+   distortion anyway.
+
+   A wavefile with phase distortion can sometimes be corrected
+   sufficiently to allow decoding with KIMTAPE. To do this you
+   need a wavefile editor that can apply low-pass or high-pass
+   filtering (which one works will need to be determined by
+   experiment). The filter frequency should be set to approx
+   1KHz with a 6dB per octave roll-off.
+
+   Note: The wavefiles produced by KIMTAPE are precompensated
+   (square wave only) and therefore suitable for recording to
+   cassette.
+
+5. Minidisc, MP3 and other "lossy" audio formats
+
+   These formats were intended for music and voice use only.
+   Do not use them to compress or store computer data wavefiles!
+   They use lossy compression methods which can introduce enough
+   distortion to make subsequent decoding of program data
+   impossible.
+
+   Note: Wavefiles produced by KIMTAPE compress extremely well
+   when archived using ZIP etc. Not only is there no loss of
+   signal quality, the compression is far superior than that
+   obtained by storing on Minidisc or as an MP3 wavefile.
+
+6. Limitations
+
+   KIMTAPE is not very tolerent to phase shift distortion and
+   there may be occasions where some tapes which work fine on
+   your computer simply won't decode using the utility. See
+   section 4 for further details.
+
+   Reading HYPERTAPE 6x speed data with KIMTAPE is likely to be
+   less reliable than reading it on a KIM.
+
+7. Adding phase precompensation to the KIM-1.
+
+   KIM-1 users may find phase precompensation useful. It should
+   make tapes written at the higher baud rates easier to decode
+   and thus more reliable. Such tapes will also be ideally suited
+   for decoding by KIMTAPE.
+
+   Adding phase precompensation to the KIM-1 is easy. All that
+   is required is to solder a 0.082 uF plastic film capacitor
+   between pin P and pin 1 of the KIM-1 application connector.
+   (If desired, a switch could be placed in series with the
+   capacitor should the KIM-1 audio output be needed for uses
+   other than the saving of programs e.g. music.)
+
+8. References
+
+   KIM-1 User's Manual
+   SYM-1 Reference Manual
+   The First Book of KIM
+   KCS - a utility for decoding Kansas City Standard tapes
+
+9. History
+
+   0.1   Original release
+   0.2   Added timing control
+   0.3   Minor changes
+   0.3b  Updated to DX-Forth 3.1 - no functional change
+   0.4   Fixed SYM-1 implementation.
+   0.5   More SYM-1 implementation fixes. Erroneous "End address
+         exceeds $FFFF" message fixed. Improved decoding for
+         HYPERTAPE 6x format data.
+

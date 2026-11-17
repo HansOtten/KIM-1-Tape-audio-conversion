@@ -1,0 +1,6 @@
+*.o
+*.ppu
+lib/
+win64/
+kimtape
+!kimtape/
