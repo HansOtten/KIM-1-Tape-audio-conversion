@@ -17,6 +17,9 @@
   - -O overwrites an existing output file without asking.
 
   Build:  fpc -O2 kimtape.pas
+
+  Copyright (c) 2026 Hans Otten. MIT License, see LICENSE.
+  The original KIMTAPE 0.5 is public domain.
 }
 
 program kimtape;

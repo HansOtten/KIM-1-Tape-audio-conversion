@@ -94,3 +94,9 @@ executable from Linux, install the win64 units and run
 The original KIMTAPE was written in DX-Forth and released as public
 domain. This port follows its structure word by word; Forth word names
 appear in the comments.
+
+## License
+
+The Free Pascal port is released under the MIT License (see `LICENSE`).
+The original KIMTAPE 0.5 files in `original/` remain public domain, as
+stated in `original/DISCLAIM.TXT`.
