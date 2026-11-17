@@ -20,7 +20,8 @@ KIMTAPE [options] infile[.typ] [outfile[.typ]]
 -An   load address (hex)          -Dn   prog ID (hex)
 
 Additional options:
--N    no automatic DC/level adjust  (decode)
+-K    classic decoder (zero crossings, as KIMTAPE 0.5)
+-N    no automatic DC/level adjust  (-K and SYM-1 decoding)
 -Pn   channel  0=mix 1=left 2=right  (decode, stereo files)
 -Sn   sample rate: output wavefile (encode) or RAW input (decode)
 -Wn   sample width 8 or 16 bits  (encode)
@@ -40,14 +41,39 @@ Switches start with `-`. On Windows `/` also works, as in the DOS original.
 
 ## What is new compared to the DOS version
 
-- **Decoding accepts any WAV format:** any sample rate (16 kHz and up,
+- **New decoder for KIM-1 and HYPERTAPE tapes.** The original counts
+  zero crossings, which fails on recordings with distorted waveforms,
+  strong harmonics or phase shift: typical for old cassettes and for
+  modern 44.1 kHz recordings. The new decoder works like the phase
+  locked loop in the KIM-1 itself:
+  - a band-pass filter (1700-4200 Hz) and a quadrature (FM)
+    discriminator measure the tone frequency, whatever the waveform
+    shape or polarity;
+  - the two tone frequencies and the bit period are measured from the
+    recording, so a recorder running too slow or fast and all speeds
+    (1x, HYPERTAPE 2x/3x/6x) are handled without switches;
+  - a bit clock locks onto the start of each bit and follows speed
+    drift; each bit is decided in its middle third
+    (0 = high-high-low, 1 = high-low-low);
+  - every bit gets a confidence value. An invalid hex character is
+    repaired by flipping its least certain bits, and every repair is
+    reported with its time in the recording. The checksum then shows
+    whether the result is correct. Decoding continues instead of
+    aborting with "Bad pattern error".
+
+  The first line of output shows what was measured, e.g.
+  `tape: tones 2455/3238 Hz, bit 1.38 ms, HYPERTAPE 6x`.
+  `-K` selects the original decoder; SYM-1 high speed tapes (`-U`)
+  always use it.
+- **Decoding accepts any WAV format:** any sample rate (11025 Hz and up,
   e.g. 44100, 48000, 96000), 8/16/24/32 bit integer or 32/64 bit float
   samples, WAVE_FORMAT_EXTENSIBLE, mono or stereo. Extra chunks (LIST,
   fact, ...) are skipped. The decoder is the original algorithm, but it
   measures cycle lengths in time instead of samples at 22050 Hz.
-- **Automatic level adjustment:** DC offset is removed and the level is
-  normalised, so quiet 16-bit recordings decode. `-N` gives the original
-  fixed levels; `-F` and `-H` still work on top of either.
+- **Automatic level adjustment** for the classic decoder (`-K`, SYM-1):
+  DC offset is removed and the level is normalised, so quiet 16-bit
+  recordings decode. `-N` gives the original fixed levels; `-F`, `-H`
+  and `-G` still work on top of either.
 - **Stereo input:** channels are mixed by default; `-P1` or `-P2` picks
   the left or right channel.
 - **VOC input:** block types 1, 2, 3, 8 and 9 are supported. RAW input at
@@ -61,6 +87,15 @@ Switches start with `-`. On Windows `/` also works, as in the DOS original.
     wrapped the 3-byte block size). Old files with the wrapped size are
     still read.
 - Error positions are given as sample number and time, not as a file offset.
+
+## Recording tips
+
+- Turn off automatic gain control (AGC) and any "enhancements" on the
+  sound card input. AGC makes the start of a recording overdriven and
+  then fades the level, which damages the first part of the data.
+- Record at a moderate level with no clipping; 16 bit, 44.1 or 48 kHz,
+  mono or stereo.
+- If one stereo channel is cleaner, select it with `-P1` or `-P2`.
 
 ## Building
 
@@ -78,8 +113,11 @@ executable from Linux, install the win64 units and run
 - The original (run in DOSBox) encoded eight test cases: KIM-1, HYPERTAPE
   3x, 6x sine, inverted, SYM-1 square and sine, VOC and RAW. All eight
   match the port's output byte for byte (apart from the stray WAV byte).
-- The same recording, resampled to 44.1/48/96 kHz as 16/24/32 bit and
+- The same recording, resampled to 11/44.1/48/96 kHz as 16/24/32 bit and
   float, stereo and quiet with DC offset, decodes to the identical program.
+- New recordings of old cassettes that the classic decoder cannot read at
+  all (overdriven, strong harmonics, about 5% slow) decode with the new
+  decoder apart from a few characters in the overdriven part.
 
 ## Repository contents
 

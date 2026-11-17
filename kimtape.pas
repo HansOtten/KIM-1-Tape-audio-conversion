@@ -4,6 +4,11 @@
   Same command line switches and the same tape encoding as the original.
 
   Additions compared to the DOS original:
+  - New default decoder for KIM-1/HYPERTAPE tapes: a frequency
+    discriminator with a bit clock, like the PLL in the KIM-1. It ignores
+    waveform distortion, measures tone frequencies, speed and bit period
+    from the tape, and repairs invalid hex characters using bit
+    confidence (checksum verifies). -K selects the original decoder.
   - Decoding accepts WAV files of any sample rate (11025 .. 192000)
     and any common sample format: 8, 16, 24, 32 bit integer PCM,
     32/64 bit float, WAVE_FORMAT_EXTENSIBLE, mono or stereo.
@@ -147,7 +152,8 @@ begin
   WriteLn('-An   load address (hex)          -Dn   prog ID (hex)');
   WriteLn;
   WriteLn('Additional options in this version:');
-  WriteLn('-N    no automatic DC/level adjust  (decode)');
+  WriteLn('-K    classic decoder (zero crossings, as KIMTAPE 0.5)');
+  WriteLn('-N    no automatic DC/level adjust  (-K and SYM-1 decoding)');
   WriteLn('-Pn   channel  0=mix 1=left 2=right  (decode, stereo files)');
   WriteLn('-Sn   sample rate: output wavefile (encode, default 22050)');
   WriteLn('      or RAW input file (decode, default 22050)');
@@ -626,14 +632,514 @@ begin
   end;
 end;
 
-function GetBit: Integer;
+{ ---------------------------------------------------------------------- }
+{ Frequency discriminator decoder (default for KIM-1 format)             }
+{                                                                        }
+{ Works like the phase locked loop in the KIM-1 itself instead of        }
+{ counting zero crossings:                                               }
+{ 1. band-pass 1700-4200 Hz (removes hum, hiss and tone harmonics),      }
+{ 2. quadrature (FM) discriminator gives the tone frequency per sample,  }
+{ 3. the two tone frequencies and the bit period are measured from the   }
+{    tape, so wrong tape speed and all HYPERTAPE speeds are handled,     }
+{ 4. a bit clock locks on the start of each bit (low->high tone change)  }
+{    and decides each bit in the middle third of the bit:                }
+{    0 = high high low, 1 = high low low.                                }
+{ Each bit also gets a confidence value; invalid hex characters are      }
+{ repaired by flipping the least certain bits, the checksum verifies.    }
+{ ---------------------------------------------------------------------- }
+
+var
+  Classic: Boolean = False;      { -K: original zero crossing decoder }
+  DecFs: Double;                 { rate of the stored discriminator output }
+  DecDelay: Integer;             { filter delay in stored samples }
+  ToneF: array of SmallInt;      { measured frequency (Hz) }
+  ToneA: array of SmallInt;      { amplitude * 16384 }
+  ToneHi: array of Byte;         { 1 = high tone }
+  ToneCum: array of LongInt;     { prefix sum of ToneHi }
+  ToneN: Integer;
+  BitVal: array of Byte;         { decoded bit stream }
+  BitConf: array of Single;      { 0 (unsure) .. 0.5 (certain) }
+  BitPos: array of LongInt;      { bit start, stored sample index }
+  BitCount, BitIdx: Integer;
+  ByteConf: array[0..7] of Single;
+  ByteTime: Double;
+  Repaired, Unreadable: Integer;
+  TotalRepaired, TotalUnreadable: Integer;
+
+procedure Discriminate;
+const
+  BPLO = 1700; BPHI = 4200;
+var
+  Rate: Double;
+  NB, NH, W, DecN, I, K, Cnt, Flush: Integer;
+  HB, HH: array of Double;
+  RX, RY: array of Double;     { rings stored twice: contiguous reads }
+  RPr, RPi: array of Double;
+  X, Y, Q, Zr, Zi, PZr, PZi, Pr, Pi_, Sr, Si, T: Double;
+  PosX, PosY, PosP: Integer;
+  PX, PH: PDouble;
+
+  function Sinc(V: Double): Double;
+  begin
+    if V = 0 then Result := 1 else Result := Sin(Pi * V) / (Pi * V);
+  end;
+
+  function Blackman(I, N: Integer): Double;
+  begin
+    Result := 0.42 - 0.5 * Cos(2 * Pi * I / (N - 1)) + 0.08 * Cos(4 * Pi * I / (N - 1));
+  end;
+
+  procedure Store(F, A: Double);
+  begin
+    if ToneN >= Length(ToneF) then
+    begin
+      SetLength(ToneF, Length(ToneF) * 2 + 65536);
+      SetLength(ToneA, Length(ToneF));
+    end;
+    ToneF[ToneN] := EnsureRange(Round(F), -32768, 32767);
+    ToneA[ToneN] := EnsureRange(Round(A * 16384), 0, 32767);
+    Inc(ToneN);
+  end;
+
 begin
-  if SymMode then Result := GetBitSym else Result := GetBitKim;
+  Rate := Reader.Rate;
+  DecN := Max(1, Round(Rate / BASERATE));
+  DecFs := Rate / DecN;
+  { band-pass at the input rate, evaluated only for the kept samples;
+    everything after it runs at the reduced rate DecFs (about 22 kHz) }
+  NB := Round(8E-3 * Rate) or 1;      { 8 ms }
+  NH := Round(2E-3 * DecFs) or 1;     { Hilbert transformer, 2 ms }
+  W := Max(3, Trunc(150E-6 * DecFs)); { smoothing, 150 us }
+  SetLength(HB, NB); SetLength(HH, NH);
+  { taps stored reversed so that HB[k] pairs with the k-th oldest sample }
+  for I := 0 to NB - 1 do
+  begin
+    T := I - (NB - 1) / 2;
+    HB[NB - 1 - I] := (2 * BPHI / Rate * Sinc(2 * BPHI / Rate * T) -
+              2 * BPLO / Rate * Sinc(2 * BPLO / Rate * T)) * Blackman(I, NB);
+  end;
+  for I := 0 to NH - 1 do
+  begin
+    K := I - (NH - 1) div 2;
+    if Odd(K) then HH[NH - 1 - I] := 2 / (Pi * K) * Blackman(I, NH) else HH[NH - 1 - I] := 0;
+  end;
+  SetLength(RX, 2 * NB); SetLength(RY, 2 * NH); SetLength(RPr, W); SetLength(RPi, W);
+  FillChar(RX[0], 2 * NB * SizeOf(Double), 0);
+  FillChar(RY[0], 2 * NH * SizeOf(Double), 0);
+  FillChar(RPr[0], W * SizeOf(Double), 0);
+  FillChar(RPi[0], W * SizeOf(Double), 0);
+  PosX := 0; PosY := 0; PosP := 0;
+  PZr := 0; PZi := 0; Sr := 0; Si := 0;
+  ToneN := 0;
+  SetLength(ToneF, 0); SetLength(ToneA, 0);
+  DecDelay := Round((NB - 1) / 2 / DecN + (NH - 1) / 2 + W / 2);
+  Cnt := 0;
+  Flush := NB + (NH + W) * DecN;
+  Reader.Rewind;
+  while True do
+  begin
+    if not Reader.ReadFrame(X) then
+    begin
+      if Flush = 0 then Break;
+      X := 0;
+      Dec(Flush);
+    end;
+    RX[PosX] := X;
+    RX[PosX + NB] := X;
+    PosX := PosX + 1;
+    if PosX = NB then PosX := 0;
+    Inc(Cnt);
+    if Cnt mod DecN <> 0 then Continue;
+    { band-pass: oldest sample is RX[PosX] }
+    Y := 0;
+    PX := @RX[PosX]; PH := @HB[0];
+    for K := 0 to NB - 1 do
+    begin
+      Y := Y + PH^ * PX^;
+      Inc(PX); Inc(PH);
+    end;
+    { Hilbert: quadrature component; in-phase is the centre sample }
+    RY[PosY] := Y;
+    RY[PosY + NH] := Y;
+    PosY := PosY + 1;
+    if PosY = NH then PosY := 0;
+    Q := 0;
+    K := 0;
+    while K < NH do
+    begin
+      if HH[K] <> 0 then Q := Q + HH[K] * RY[PosY + K];
+      Inc(K);
+    end;
+    Zr := RY[PosY + (NH - 1) div 2];
+    Zi := Q;
+    { phase step z[n] * conj(z[n-1]), averaged }
+    Pr := Zr * PZr + Zi * PZi;
+    Pi_ := Zi * PZr - Zr * PZi;
+    PZr := Zr; PZi := Zi;
+    Sr := Sr + Pr - RPr[PosP];
+    Si := Si + Pi_ - RPi[PosP];
+    RPr[PosP] := Pr; RPi[PosP] := Pi_;
+    PosP := PosP + 1;
+    if PosP = W then PosP := 0;
+    Store(ArcTan2(Si, Sr) * DecFs / (2 * Pi), Sqrt(Zr * Zr + Zi * Zi));
+  end;
+end;
+
+{ Measure tone frequencies, set the high/low decision }
+procedure Calibrate(out FLo, FHi, KSpeed: Double);
+const
+  NA = 4096;
+var
+  AHist: array[0..NA - 1] of Int64;
+  FHist: array[0..61] of Int64;   { 1500..4600 Hz, 50 Hz bins }
+  I, J, Total: Integer;
+  Acc, Target: Int64;
+  Act, Thr: Integer;
+  Sp, Fl, Fh, Ca, Cb, Na_, Nb_, Sc, Best, C: Double;
+begin
+  FillChar(AHist, SizeOf(AHist), 0);
+  for I := 0 to ToneN - 1 do Inc(AHist[ToneA[I] * (NA - 1) div 32767]);
+  Target := Max(1, ToneN div 100);       { 99th percentile }
+  Acc := 0; I := NA - 1;
+  while (I > 0) and (Acc + AHist[I] < Target) do
+  begin
+    Acc := Acc + AHist[I];
+    Dec(I);
+  end;
+  Act := Round(0.25 * I * 32767 / (NA - 1));
+  FillChar(FHist, SizeOf(FHist), 0);
+  Total := 0;
+  for I := 0 to ToneN - 1 do
+    if (ToneA[I] > Act) and (ToneF[I] >= 1500) and (ToneF[I] < 4600) then
+    begin
+      Inc(FHist[(ToneF[I] - 1500) div 50]);
+      Inc(Total);
+    end;
+  FLo := 2400; FHi := 3600;
+  Best := -1;
+  if Total > 0 then
+  begin
+    Sp := 2500;
+    while Sp < 3400 do
+    begin
+      Ca := 0; Na_ := 0; Cb := 0; Nb_ := 0;
+      for J := 0 to 61 do
+      begin
+        C := 1500 + J * 50 + 25;
+        if (C > 1700) and (C < Sp) then begin Ca := Ca + C * FHist[J]; Na_ := Na_ + FHist[J]; end;
+        if (C >= Sp) and (C < 4300) then begin Cb := Cb + C * FHist[J]; Nb_ := Nb_ + FHist[J]; end;
+      end;
+      if (Na_ > 0) and (Nb_ > 0) then
+      begin
+        Fl := Ca / Na_; Fh := Cb / Nb_;
+        Sc := 0;
+        for J := 0 to 61 do
+        begin
+          C := 1500 + J * 50 + 25;
+          if (C > 1700) and (C < Sp) then Sc := Sc + Sqr(C - Fl) * FHist[J];
+          if (C >= Sp) and (C < 4300) then Sc := Sc + Sqr(C - Fh) * FHist[J];
+        end;
+        Sc := Sc / (Na_ + Nb_);
+        if (Best < 0) or (Sc < Best) then
+        begin
+          Best := Sc; FLo := Fl; FHi := Fh;
+        end;
+      end;
+      Sp := Sp + 50;
+    end;
+  end;
+  KSpeed := (FHi / 3600 + FLo / 2400) / 2;
+  Thr := Round(Sqrt(FLo * FHi));
+  SetLength(ToneHi, ToneN);
+  SetLength(ToneCum, ToneN + 1);
+  ToneCum[0] := 0;
+  for I := 0 to ToneN - 1 do
+  begin
+    ToneHi[I] := Ord(ToneF[I] > Thr);
+    ToneCum[I + 1] := ToneCum[I] + ToneHi[I];
+  end;
+  SetLength(ToneF, 0);
+  SetLength(ToneA, 0);
+end;
+
+{ Most common bit period: high tone run + following low tone run }
+function MeasureBitPeriod: Double;
+var
+  RunV: array of Byte;
+  RunL: array of LongInt;
+  NR, I, L, MinL, MaxL, Bin, BestBin: Integer;
+  Hist: array of LongInt;
+  BinW: Double;
+begin
+  RunV := nil; RunL := nil;
+  SetLength(RunV, 1024); SetLength(RunL, 1024);
+  NR := 0;
+  MinL := Round(0.15E-3 * DecFs);
+  I := 0;
+  while I < ToneN do
+  begin
+    L := I;
+    while (L < ToneN) and (ToneHi[L] = ToneHi[I]) do Inc(L);
+    if L - I >= MinL then
+    begin
+      if NR >= Length(RunV) then
+      begin
+        SetLength(RunV, NR * 2); SetLength(RunL, NR * 2);
+      end;
+      RunV[NR] := ToneHi[I];
+      RunL[NR] := L - I;
+      Inc(NR);
+    end;
+    I := L;
+  end;
+  BinW := Max(1, Trunc(0.05E-3 * DecFs));
+  SetLength(Hist, Trunc(25E-3 * DecFs / BinW) + 2);
+  MaxL := Round(8E-3 * DecFs);
+  for I := 0 to NR - 2 do
+    if (RunV[I] = 1) and (RunV[I + 1] = 0) and (RunL[I] < MaxL) and (RunL[I + 1] < MaxL) then
+    begin
+      Bin := Trunc((RunL[I] + RunL[I + 1]) / BinW);
+      if Bin <= High(Hist) then Inc(Hist[Bin]);
+    end;
+  BestBin := 0;
+  for I := 1 to High(Hist) do
+    if Hist[I] > Hist[BestBin] then BestBin := I;
+  if Hist[BestBin] = 0 then Result := 0
+  else Result := (BestBin + 0.5) * BinW;
+end;
+
+function HighFrac(A, B: Double): Double;
+var
+  IA, IB: Integer;
+begin
+  IA := EnsureRange(Trunc(A), 0, ToneN);
+  IB := EnsureRange(Trunc(B), 0, ToneN);
+  if IB <= IA then Exit(0);
+  Result := (ToneCum[IB] - ToneCum[IA]) / (IB - IA);
+end;
+
+procedure AddBit(V: Integer; Conf: Double; Pos: Integer);
+begin
+  if BitCount >= Length(BitVal) then
+  begin
+    SetLength(BitVal, BitCount * 2 + 4096);
+    SetLength(BitConf, Length(BitVal));
+    SetLength(BitPos, Length(BitVal));
+  end;
+  BitVal[BitCount] := V;
+  BitConf[BitCount] := Conf;
+  BitPos[BitCount] := Pos;
+  Inc(BitCount);
+end;
+
+{ Bit clock: lock on low->high tone changes, track the tape speed }
+procedure ClockBits(PM: Double);
+var
+  Tr: array of LongInt;
+  NT, I, J, Best, Miss, K: Integer;
+  U0, P, Pred, Win, Tb, Prev, U, M: Double;
+  HavePrev: Boolean;
+begin
+  Tr := nil;
+  SetLength(Tr, 4096);
+  NT := 0;
+  for I := 1 to ToneN - 1 do
+    if (ToneHi[I] = 1) and (ToneHi[I - 1] = 0) then
+    begin
+      if NT >= Length(Tr) then SetLength(Tr, NT * 2);
+      Tr[NT] := I;
+      Inc(NT);
+    end;
+  BitCount := 0;
+  U0 := PM / 3; P := PM;
+  HavePrev := False; K := 0; Miss := 0; Prev := 0;
+  while True do
+  begin
+    if not HavePrev then
+    begin
+      if K >= NT then Break;
+      Tb := Tr[K]; P := PM; Miss := 0;
+    end
+    else
+    begin
+      if Miss = 0 then Win := 0.15 * P else Win := 0.3 * P;
+      Pred := Prev + P;
+      { first transition at or after Pred - Win }
+      I := 0; J := NT;
+      while I < J do
+        if Tr[(I + J) div 2] < Pred - Win then I := (I + J) div 2 + 1 else J := (I + J) div 2;
+      Best := -1;
+      while (I < NT) and (Tr[I] <= Pred + Win) do
+      begin
+        if (Best < 0) or (Abs(Tr[I] - Pred) < Abs(Tr[Best] - Pred)) then Best := I;
+        Inc(I);
+      end;
+      if Best >= 0 then
+      begin
+        Tb := Tr[Best];
+        Miss := 0;
+        P := 0.95 * P + 0.05 * (Tb - Prev);   { follow tape speed }
+        P := EnsureRange(P, 2.4 * U0, 3.6 * U0);
+      end
+      else
+      begin
+        Tb := Pred;
+        Inc(Miss);
+      end;
+      if Tb + P > ToneN then Break;
+    end;
+    U := P / 3;
+    M := HighFrac(Tb + U + 0.15 * U, Tb + 2 * U - 0.15 * U);   { middle third }
+    if M > 0.5 then AddBit(0, M - 0.5, Round(Tb)) else AddBit(1, 0.5 - M, Round(Tb));
+    Prev := Tb;
+    HavePrev := True;
+    if Miss > 8 then
+    begin
+      { lost lock: restart at the next tone change }
+      I := 0; J := NT;
+      while I < J do
+        if Tr[(I + J) div 2] < Tb + P then I := (I + J) div 2 + 1 else J := (I + J) div 2;
+      K := I;
+      HavePrev := False;
+    end;
+  end;
+end;
+
+function SpeedName(PM: Double; KSpeed: Double): string;
+var
+  Chunks: Double;
+begin
+  { one unit is (6 div speed) chunks of 9 samples at 22050 Hz }
+  Chunks := PM / DecFs * KSpeed / 3 / (9 / BASERATE);
+  if Abs(Chunks - 6) < 0.6 then Result := 'KIM-1 1x'
+  else if Abs(Chunks - 3) < 0.35 then Result := 'HYPERTAPE 2x'
+  else if Abs(Chunks - 2) < 0.25 then Result := 'HYPERTAPE 3x'
+  else if Abs(Chunks - 1) < 0.15 then Result := 'HYPERTAPE 6x'
+  else Result := 'non-standard speed';
+end;
+
+procedure PrepareBits;
+var
+  FLo, FHi, KSpeed, PM: Double;
+begin
+  Discriminate;
+  Calibrate(FLo, FHi, KSpeed);
+  PM := MeasureBitPeriod;
+  if PM <= 0 then
+  begin
+    WriteLn('tape:    no KIM-1 tones found');
+    BitCount := 0;
+  end
+  else
+  begin
+    WriteLn(Format('tape:    tones %.0f/%.0f Hz, bit %.2f ms, %s',
+      [FLo, FHi, PM / DecFs * 1000, SpeedName(PM, KSpeed)]));
+    ClockBits(PM);
+  end;
+  SetLength(ToneHi, 0);
+  SetLength(ToneCum, 0);
+  BitIdx := 0;
+end;
+
+function GetBitPLL(out Conf: Single): Integer;
+begin
+  if BitIdx >= BitCount then raise EEndOfData.Create('');
+  Result := BitVal[BitIdx];
+  Conf := BitConf[BitIdx];
+  Inc(BitIdx);
+end;
+
+function BitTime(I: Integer): Double;
+begin
+  if BitCount = 0 then Exit(0);
+  I := EnsureRange(I, 0, BitCount - 1);
+  Result := Max(0, BitPos[I] - DecDelay) / DecFs;
+end;
+
+function IsHexChar(C: Integer): Boolean;
+begin
+  Result := (C in [Ord('0')..Ord('9')]) or (C in [Ord('A')..Ord('F')]);
+end;
+
+{ Repair an invalid character by flipping its least certain bits }
+function RepairChar(C: Integer; AllowSlash: Boolean; out Fixed: Integer): Boolean;
+var
+  Order: array[0..7] of Integer;
+  I, J, T, A, B: Integer;
+
+  function Ok(D: Integer): Boolean;
+  begin
+    Result := IsHexChar(D) or (AllowSlash and (D = Ord('/')));
+  end;
+
+begin
+  for I := 0 to 7 do Order[I] := I;
+  for I := 0 to 6 do
+    for J := I + 1 to 7 do
+      if ByteConf[Order[J]] < ByteConf[Order[I]] then
+      begin
+        T := Order[I]; Order[I] := Order[J]; Order[J] := T;
+      end;
+  Result := True;
+  for A := 0 to 3 do
+  begin
+    Fixed := C xor (1 shl Order[A]);
+    if Ok(Fixed) then Exit;
+  end;
+  for A := 0 to 2 do
+    for B := A + 1 to 3 do
+    begin
+      Fixed := C xor (1 shl Order[A]) xor (1 shl Order[B]);
+      if Ok(Fixed) then Exit;
+    end;
+  Result := False;
+  Fixed := Ord('0');
+end;
+
+procedure ReportChar(C, Fixed: Integer; Ok: Boolean);
+begin
+  if Repaired + Unreadable <= 20 then
+  begin
+    WriteLn;
+    if Ok then
+      Write(Format('repaired character at %.2f s: $%s -> "%s"', [ByteTime, H2(C), Chr(Fixed)]))
+    else
+      Write(Format('unreadable character at %.2f s: $%s', [ByteTime, H2(C)]));
+  end;
+end;
+
+{ Make an invalid hex character valid (PLL mode) }
+function FixChar(C: Integer; AllowSlash: Boolean): Integer;
+var
+  Ok: Boolean;
+begin
+  Result := C;
+  if IsHexChar(C) or (AllowSlash and (C = Ord('/'))) then Exit;
+  Ok := RepairChar(C, AllowSlash, Result);
+  if Ok then Inc(Repaired) else Inc(Unreadable);
+  ReportChar(C, Result, Ok);
+end;
+
+function UsePLL: Boolean;
+begin
+  Result := not (Classic or SymMode);
+end;
+
+function GetBit: Integer;
+var
+  C: Single;
+begin
+  if UsePLL then
+    Result := GetBitPLL(C)
+  else if SymMode then Result := GetBitSym else Result := GetBitKim;
 end;
 
 function PosText: string;
 begin
-  Result := Format(' at sample %d (%.3f s)', [Reader.Position, Reader.Position / Reader.Rate]);
+  if UsePLL then
+    Result := Format(' at %.3f s', [BitTime(BitIdx)])
+  else
+    Result := Format(' at sample %d (%.3f s)', [Reader.Position, Reader.Position / Reader.Rate]);
 end;
 
 function DecodedText: string;
@@ -643,6 +1149,8 @@ begin
   Result := Result + '  checksum ';
   if Checksum <> 0 then Result := Result + 'ERROR' else Result := Result + 'OK';
   Result := Result + '  ' + IntToStr(DecodeCount) + ' bytes';
+  if Repaired > 0 then Result := Result + ', ' + IntToStr(Repaired) + ' chars repaired';
+  if Unreadable > 0 then Result := Result + ', ' + IntToStr(Unreadable) + ' chars unreadable';
 end;
 
 procedure ShowDecoded;
@@ -672,11 +1180,24 @@ end;
 function DecodeByte: Integer;
 var
   I: Integer;
+  C: Single;
 begin
-  if SymMode then SeekHalf;      { discard start bit }
   Result := 0;
-  for I := 1 to 8 do
-    Result := (Result shr 1) or (GetBit shl 7);
+  if UsePLL then
+  begin
+    ByteTime := BitTime(BitIdx);
+    for I := 0 to 7 do
+    begin
+      Result := (Result shr 1) or (GetBitPLL(C) shl 7);
+      ByteConf[I] := C;
+    end;
+  end
+  else
+  begin
+    if SymMode then SeekHalf;      { discard start bit }
+    for I := 1 to 8 do
+      Result := (Result shr 1) or (GetBit shl 7);
+  end;
   EmitChar(Result);
 end;
 
@@ -750,6 +1271,7 @@ end;
 
 function HexChar(U, C: Integer): Integer;
 begin
+  if UsePLL then C := FixChar(C, False);
   if C < Ord('0') then BadPattern;
   if C > Ord('9') then
   begin
@@ -792,6 +1314,8 @@ begin
 end;
 
 function GetDataByte(out B: Integer): Boolean;
+var
+  C2: Integer;
 begin
   Result := False;
   if SymMode then
@@ -807,8 +1331,11 @@ begin
   else
   begin
     B := DecodeByte;
+    if UsePLL then B := FixChar(B, True);
     if B = Ord('/') then Exit;
-    B := HexChar(HexChar(0, B), DecodeByte);
+    B := HexChar(0, B);
+    C2 := DecodeByte;
+    B := HexChar(B, C2);
   end;
   Result := True;
 end;
@@ -900,9 +1427,12 @@ begin
     else ChanText := IntToStr(Reader.Channels) + ' channels';
     WriteLn(Format('format:  %s %d Hz %d %s %s', [Reader.Kind, Reader.Rate, Reader.Bits, Fmt,
       ChanText]));
-    if Reader.Rate < 16000 then
+    if (Reader.Rate < 16000) and not UsePLL then
       WriteLn('warning: sample rate below 16000 Hz, decoding may fail');
-    MeasureLevels;
+    if UsePLL then
+      PrepareBits
+    else
+      MeasureLevels;
     { The original counts samples at 22050/sec: a whole cycle of at most
       MAXWAVE samples is a high tone (KIM), a half cycle of at most
       MAXWAVE+3 samples is a high tone (SYM). Scale to the actual rate. }
@@ -917,6 +1447,7 @@ begin
         on EEndOfData do Break;
       end;
       DecodeCount := 0;
+      Repaired := 0; Unreadable := 0;
       try GetID; except on EEndOfData do Missing('ID'); end;
       Checksum := 0;
       try GetAddress; except on EEndOfData do Missing('address'); end;
@@ -924,6 +1455,8 @@ begin
       try GetChecksum; except on EEndOfData do Missing('checksum'); end;
       GetEnd;
       ShowDecoded;
+      if Repaired + Unreadable > 20 then
+        Write(Format('  (%d more not listed)', [Repaired + Unreadable - 20]));
     end;
   finally
     FreeAndNil(Reader);
@@ -1426,6 +1959,7 @@ begin
       case C of
         'C': ConOut := True;
         'I': Polarity := True;
+        'K': Classic := True;
         'M': Decoding := False;
         'N': Normalize := False;
         'O': Overwrite := True;
