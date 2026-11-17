@@ -111,6 +111,9 @@ var
 
   InFile, OutFile: string;
   InFiles: array of string;      { several recordings: rec1+rec2+... }
+  TapeLine: string;
+  SuppressEmit: Boolean = False;
+  ForceEmph: Integer = -1;       { -E: fixed high frequency emphasis }
   OutStream: TFileStream = nil;
 
 { ---------------------------------------------------------------------- }
@@ -154,6 +157,7 @@ begin
   WriteLn;
   WriteLn('Additional options in this version:');
   WriteLn('-K    classic decoder (zero crossings, as KIMTAPE 0.5)');
+  WriteLn('-En   high tone boost 0..4 (default: automatic)');
   WriteLn('-N    no automatic DC/level adjust  (-K and SYM-1 decoding)');
   WriteLn('-Pn   channel  0=mix 1=left 2=right  (decode, stereo files)');
   WriteLn('-Sn   sample rate: output wavefile (encode, default 22050)');
@@ -561,7 +565,7 @@ end;
 
 procedure EmitChar(B: Byte);   { ?EMIT }
 begin
-  if ConOut then
+  if ConOut and not SuppressEmit then
     if (B >= 32) and (B < 127) then Write(Chr(B)) else Write('.');
 end;
 
@@ -670,7 +674,7 @@ var
   Repaired, Unreadable: Integer;
   TotalRepaired, TotalUnreadable: Integer;
 
-procedure Discriminate;
+procedure Discriminate(Emph: Integer);
 const
   BPLO = 1700; BPHI = 4200;
 var
@@ -682,6 +686,9 @@ var
   X, Y, Q, Zr, Zi, PZr, PZi, Pr, Pi_, Sr, Si, T: Double;
   PosX, PosY, PosP: Integer;
   PX, PH: PDouble;
+  EPrev: array[1..4] of Double;
+  E: Integer;
+  T2: Double;
 
   function Sinc(V: Double): Double;
   begin
@@ -739,6 +746,7 @@ begin
   DecDelay := Round((NB - 1) / 2 / DecN + (NH - 1) / 2 + W / 2);
   Cnt := 0;
   Flush := NB + (NH + W) * DecN;
+  for E := 1 to 4 do EPrev[E] := 0;
   Reader.Rewind;
   while True do
   begin
@@ -747,6 +755,14 @@ begin
       if Flush = 0 then Break;
       X := 0;
       Dec(Flush);
+    end;
+    { high frequency emphasis: Emph first differences (+3.5 dB at
+      3600 Hz relative to 2400 Hz each) for players that lose highs }
+    for E := 1 to Emph do
+    begin
+      T2 := X - EPrev[E];
+      EPrev[E] := X;
+      X := T2;
     end;
     RX[PosX] := X;
     RX[PosX + NB] := X;
@@ -1022,22 +1038,24 @@ begin
   else Result := 'non-standard speed';
 end;
 
-procedure PrepareBits;
+procedure PrepareBits(Emph: Integer);
 var
   FLo, FHi, KSpeed, PM: Double;
 begin
-  Discriminate;
+  Discriminate(Emph);
   Calibrate(FLo, FHi, KSpeed);
   PM := MeasureBitPeriod;
   if PM <= 0 then
   begin
-    WriteLn('tape:    no KIM-1 tones found');
+    TapeLine := 'tape:    no KIM-1 tones found';
     BitCount := 0;
   end
   else
   begin
-    WriteLn(Format('tape:    tones %.0f/%.0f Hz, bit %.2f ms, %s',
-      [FLo, FHi, PM / DecFs * 1000, SpeedName(PM, KSpeed)]));
+    TapeLine := Format('tape:    tones %.0f/%.0f Hz, bit %.2f ms, %s',
+      [FLo, FHi, PM / DecFs * 1000, SpeedName(PM, KSpeed)]);
+    if Emph > 0 then
+      TapeLine := TapeLine + Format(', high tone boost %d (%.1f dB)', [Emph, Emph * 3.5]);
     ClockBits(PM);
   end;
   SetLength(ToneHi, 0);
@@ -1421,6 +1439,7 @@ begin
 end;
 
 procedure DecodeCombined; forward;
+procedure PrepareBestBits; forward;
 
 procedure Decode;
 var
@@ -1441,7 +1460,7 @@ begin
     if (Reader.Rate < 16000) and not UsePLL then
       WriteLn('warning: sample rate below 16000 Hz, decoding may fail');
     if UsePLL then
-      PrepareBits
+      PrepareBestBits
     else
       MeasureLevels;
     { The original counts samples at 22050/sec: a whole cycle of at most
@@ -1543,6 +1562,65 @@ begin
     SetLength(Result, Length(Result) + 1);
     Result[High(Result)] := P;
   end;
+end;
+
+{ Decode with 0..3 steps of high frequency emphasis and keep the one
+  that gives the cleanest data (most valid characters). Players with a
+  misaligned head lose the 3600 Hz tone; the emphasis restores it. }
+procedure PrepareBestBits;
+var
+  N, BestN, P, I: Integer;
+  Score, BestScore: Int64;
+  Bad: Integer;
+  Progs: TTapeRec;
+  BV: array of Byte;
+  BC: array of Single;
+  BP: array of LongInt;
+  BCount: Integer;
+  BLine: string;
+begin
+  if ForceEmph >= 0 then
+  begin
+    PrepareBits(ForceEmph);
+    WriteLn(TapeLine);
+    Exit;
+  end;
+  BestN := -1; BestScore := 0; BCount := 0;
+  BV := nil; BC := nil; BP := nil;
+  for N := 0 to 3 do
+  begin
+    PrepareBits(N);
+    SuppressEmit := True;
+    try
+      Progs := CollectPrograms;
+    finally
+      SuppressEmit := False;
+    end;
+    Score := 0; Bad := 0;
+    for P := 0 to High(Progs) do
+      for I := 0 to High(Progs[P]) do
+        if IsHexChar(Progs[P][I].B) or (Progs[P][I].B = Ord('/')) then Inc(Score)
+        else
+        begin
+          Dec(Score, 4);
+          Inc(Bad);
+        end;
+    if (BestN < 0) or (Score > BestScore) then
+    begin
+      BestN := N; BestScore := Score;
+      BV := Copy(BitVal, 0, BitCount);
+      BC := Copy(BitConf, 0, BitCount);
+      BP := Copy(BitPos, 0, BitCount);
+      BCount := BitCount;
+      BLine := TapeLine;
+    end;
+    { a clean first pass needs no correction }
+    if (N = 0) and (Bad = 0) and (Length(Progs) > 0) then Break;
+  end;
+  BitVal := BV; BitConf := BC; BitPos := BP;
+  BitCount := BCount;
+  BitIdx := 0;
+  WriteLn(BLine);
 end;
 
 function HexVal(C: Integer): Integer;
@@ -1943,7 +2021,7 @@ begin
     Reader := TAudioReader.Create(InFiles[R], Wave = wtRAW, SampleRate);
     try
       Write(Format('%d: %s %d Hz  ', [R + 1, ExtractFileName(InFiles[R]), Reader.Rate]));
-      PrepareBits;
+      PrepareBestBits;
       Recs[R] := CollectPrograms;
     finally
       FreeAndNil(Reader);
@@ -2450,6 +2528,7 @@ begin
       'B': Speed := ParseNum(Rest, False, 2, 6);
       'D': FileID := ParseNum(Rest, True, 0, $FF);
       'F': begin Bias := ParseNum(Rest, False, -127, 127); SetLevels; end;
+      'E': ForceEmph := ParseNum(Rest, False, 0, 4);
       'G': MaxWave := MaxWave + ParseNum(Rest, False, -2, 2);
       'H': begin Hysteresis := ParseNum(Rest, False, 0, 127); SetLevels; end;
       'L': LeadTime := ParseNum(Rest, False, 0, 3600);

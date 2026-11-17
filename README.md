@@ -21,6 +21,7 @@ KIMTAPE [options] infile[.typ] [outfile[.typ]]
 
 Additional options:
 -K    classic decoder (zero crossings, as KIMTAPE 0.5)
+-En   high tone boost 0..4 (default: automatic)
 -N    no automatic DC/level adjust  (-K and SYM-1 decoding)
 -Pn   channel  0=mix 1=left 2=right  (decode, stereo files)
 -Sn   sample rate: output wavefile (encode) or RAW input (decode)
@@ -66,6 +67,11 @@ Switches start with `-`. On Windows `/` also works, as in the DOS original.
     reported with its time in the recording. The checksum then shows
     whether the result is correct. Decoding continues instead of
     aborting with "Bad pattern error".
+
+  - cassette players with a misaligned head (azimuth) lose the 3600 Hz
+    tone. The decoder tries 0 to 3 steps of high tone boost (+3.5 dB
+    each) and keeps the one that gives the cleanest data; a clean
+    first pass needs no extra time. `-En` sets the boost by hand.
 
   The first line of output shows what was measured, e.g.
   `tape: tones 2455/3238 Hz, bit 1.38 ms, HYPERTAPE 6x`.
@@ -123,6 +129,10 @@ Switches start with `-`. On Windows `/` also works, as in the DOS original.
 - Also turn off noise suppression, noise gates and limiters. They cut
   quiet parts to silence and squash the loud parts.
 - Record the whole program plus a few seconds of silence after it.
+- A quiet recording is fine; clipping or a limiter is not.
+- If KIMTAPE reports a high tone boost, the player's head is probably
+  not aligned with the recorder that made the tape. Adjusting the
+  azimuth screw for the brightest sound helps.
 - If one stereo channel is cleaner, select it with `-P1` or `-P2`.
 - Several recordings of a difficult tape can be combined (`+`).
 
