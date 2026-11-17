@@ -110,6 +110,7 @@ var
   Overwrite: Boolean = False;  { -O }
 
   InFile, OutFile: string;
+  InFiles: array of string;      { several recordings: rec1+rec2+... }
   OutStream: TFileStream = nil;
 
 { ---------------------------------------------------------------------- }
@@ -159,6 +160,9 @@ begin
   WriteLn('      or RAW input file (decode, default 22050)');
   WriteLn('-Wn   sample width 8 or 16 bits  (encode, default 8)');
   WriteLn('-O    overwrite output file without asking');
+  WriteLn;
+  WriteLn('Several recordings of the same tape can be combined:');
+  WriteLn('  KIMTAPE rec1.wav+rec2.wav+rec3.wav outfile');
   WriteLn;
   WriteLn('default: decode WAV file, KIM-1 format');
   WriteLn('         load address=0200, file ID=00');
@@ -1416,10 +1420,17 @@ begin
   WriteLn(Format('level:   DC offset %.1f%%  gain %.2f', [LevelDC * 100, LevelGain]));
 end;
 
+procedure DecodeCombined; forward;
+
 procedure Decode;
 var
   Fmt, ChanText: string;
 begin
+  if Length(InFiles) > 1 then
+  begin
+    DecodeCombined;
+    Exit;
+  end;
   Reader := TAudioReader.Create(InFile, Wave = wtRAW, SampleRate);
   try
     if Reader.Fmt = sfFloat then Fmt := 'float' else Fmt := 'bit';
@@ -1460,6 +1471,500 @@ begin
     end;
   finally
     FreeAndNil(Reader);
+  end;
+end;
+
+{ ---------------------------------------------------------------------- }
+{ Combining several recordings of the same tape                          }
+{ (infile1+infile2+...): soft majority vote per bit, weighted by the     }
+{ decoder's confidence, restricted to valid characters; remaining        }
+{ checksum errors are resolved by trying alternatives for the least      }
+{ certain characters.                                                    }
+{ ---------------------------------------------------------------------- }
+
+type
+  TTapeChar = record
+    B: Byte;
+    C: array[0..7] of Single;
+    T: Single;               { time in the recording }
+  end;
+  TTapeProg = array of TTapeChar;
+  TTapeRec = array of TTapeProg;
+
+{ Read all programs of the current recording as raw characters after '*' }
+function CollectPrograms: TTapeRec;
+var
+  P: TTapeProg;
+  N, Tail, Junk, I: Integer;
+  B: Integer;
+  Slash: Boolean;
+begin
+  Result := nil;
+  while True do
+  begin
+    try
+      FindPreamble;
+    except
+      on EEndOfData do Break;
+    end;
+    P := nil; N := 0; Tail := -1; Junk := 0;
+    Slash := False;
+    while True do
+    begin
+      try
+        B := DecodeByte;
+      except
+        on EEndOfData do Break;
+      end;
+      if B in [SYNC, EOT, 0] then Inc(Junk) else Junk := 0;
+      if Junk >= 3 then
+      begin
+        N := N - 2;   { drop the junk already stored }
+        Break;
+      end;
+      if N >= Length(P) then SetLength(P, N * 2 + 256);
+      P[N].B := B;
+      for I := 0 to 7 do P[N].C[I] := ByteConf[I];
+      P[N].T := ByteTime;
+      Inc(N);
+      if Slash then
+      begin
+        Dec(Tail);
+        if Tail = 0 then Break;
+      end
+      else if (B = Ord('/')) and (N - 1 >= 6) and not Odd(N - 1) then
+      begin
+        Slash := True;
+        Tail := 4;    { four checksum characters follow }
+      end;
+      if N > 2 * 65536 + 16 then Break;
+    end;
+    SetLength(P, Max(0, N));
+    SetLength(Result, Length(Result) + 1);
+    Result[High(Result)] := P;
+  end;
+end;
+
+function HexVal(C: Integer): Integer;
+begin
+  if C <= Ord('9') then Result := C - Ord('0') else Result := C - Ord('A') + 10;
+end;
+
+const
+  CandChars: string = '0123456789ABCDEF/';
+
+procedure CombineProgram(const Progs: array of TTapeProg; const RecNames: array of string;
+  ProgNo: Integer);
+const
+  MAXU = 12;
+var
+  NR, L, I, J, R, Q, K, Bit, SlashPos, NData, Best, Second, NU, Combo, NCombo: Integer;
+  V: array[0..7] of Double;
+  Score: array of array of Double;   { [pos][candidate 0..16] }
+  Choice, Choice2: array of Integer;
+  Margin: array of Double;
+  Valid: array of array of Boolean;  { [rec][pos] recording used here }
+  Agree, Cnt: Integer;
+  S, BestScore, Total: Double;
+  UPos: array[0..MAXU - 1] of Integer = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+  CkCalc, CkTape, Matches: Integer;
+  BestCombo: Integer;
+  Differ: Integer;
+  ID, Addr: Integer;
+  BestFlips, Flips, VaryMask, FirstMatch, LastByte: Integer;
+  AltText: string;
+  Unknown: array of Boolean;
+  NUnk, UnkPos, UnkVal, BestUnk, FirstUnk: Integer;
+  HasValid, Conflict, Found, UnkVaries: Boolean;
+
+  function CharScore(Pos, Cand: Integer): Double;
+  var
+    Q2, D: Integer;
+  begin
+    D := Ord(CandChars[Cand + 1]);
+    Result := 0;
+    for Q2 := 0 to 7 do
+      if Odd(D shr Q2) then Result := Result + V[Q2] else Result := Result - V[Q2];
+  end;
+
+  procedure Vote(Pos: Integer);
+  var
+    R2, Q2, N2: Integer;
+    C, Wt: Double;
+  begin
+    for Q2 := 0 to 7 do V[Q2] := 0;
+    for R2 := 0 to NR - 1 do
+      if (Pos <= High(Progs[R2])) and Valid[R2][Pos] then
+      begin
+        { a recording that produced an invalid character here is unreliable }
+        Wt := 1;
+        if not (IsHexChar(Progs[R2][Pos].B) or (Progs[R2][Pos].B = Ord('/'))) then Wt := 0.25;
+        { errors come in bursts: invalid neighbours lower the trust }
+        for N2 := Pos - 3 to Pos + 3 do
+          if (N2 <> Pos) and (N2 >= 0) and (N2 <= High(Progs[R2])) and
+             not (IsHexChar(Progs[R2][N2].B) or (Progs[R2][N2].B in [Ord('/'), Ord('*')])) then
+            Wt := Wt * 0.6;
+        for Q2 := 0 to 7 do
+        begin
+          C := (Progs[R2][Pos].C[Q2] + 0.01) * Wt;   { small weight even when unsure }
+          if Odd(Progs[R2][Pos].B shr Q2) then V[Q2] := V[Q2] + C else V[Q2] := V[Q2] - C;
+        end;
+      end;
+  end;
+
+  procedure ScoreAll;
+  var
+    P2, K2: Integer;
+  begin
+    for P2 := 0 to L - 1 do
+    begin
+      Vote(P2);
+      for K2 := 0 to 16 do Score[P2][K2] := CharScore(P2, K2);
+    end;
+  end;
+
+  { best candidate for a position; slash only where allowed }
+  procedure Pick(P2: Integer; AllowSlash: Boolean; out B1, B2: Integer);
+  var
+    K2, Last: Integer;
+  begin
+    if AllowSlash then Last := 16 else Last := 15;
+    B1 := 0; B2 := 1;
+    if Score[P2][1] > Score[P2][0] then begin B1 := 1; B2 := 0; end;
+    for K2 := 2 to Last do
+      if Score[P2][K2] > Score[P2][B1] then begin B2 := B1; B1 := K2; end
+      else if Score[P2][K2] > Score[P2][B2] then B2 := K2;
+  end;
+
+  function CharOf(P2: Integer): Integer;
+  begin
+    Result := Ord(CandChars[Choice[P2] + 1]);
+  end;
+
+  function ByteAt(P2: Integer): Integer;   { hex pair starting at P2 }
+  begin
+    Result := HexVal(CharOf(P2)) * 16 + HexVal(CharOf(P2 + 1));
+  end;
+
+  function CalcChecksums(out Calc, Tape: Integer): Boolean;
+  var
+    P2: Integer;
+  begin
+    Calc := 0;
+    P2 := 2;
+    while P2 < SlashPos do
+    begin
+      Calc := (Calc + ByteAt(P2)) and $FFFF;
+      Inc(P2, 2);
+    end;
+    if SlashPos + 4 < L then
+      Tape := ByteAt(SlashPos + 1) + ByteAt(SlashPos + 3) * 256
+    else
+      Tape := -1;
+    Result := Calc = Tape;
+  end;
+
+begin
+  NR := Length(Progs);
+  L := 0;
+  for R := 0 to NR - 1 do L := Max(L, Length(Progs[R]));
+  if L < 6 then Exit;
+  SetLength(Score, L, 17);
+  SetLength(Choice, L);
+  SetLength(Choice2, L);
+  SetLength(Margin, L);
+  SetLength(Valid, NR, L);
+  for R := 0 to NR - 1 do
+    for I := 0 to L - 1 do Valid[R][I] := I <= High(Progs[R]);
+
+  { first pass, then drop recordings that lose sync (bit slip) }
+  ScoreAll;
+  for I := 0 to L - 1 do Pick(I, True, Choice[I], Choice2[I]);
+  for R := 0 to NR - 1 do
+  begin
+    I := 0;
+    while I + 16 <= Length(Progs[R]) do
+    begin
+      Agree := 0; Cnt := 0;
+      for J := I to I + 15 do
+      begin
+        Inc(Cnt);
+        if Progs[R][J].B = CharOf(J) then Inc(Agree);
+      end;
+      if (NR > 1) and (Agree * 4 < Cnt) then
+      begin
+        { from here this recording no longer agrees: ignore the rest }
+        for J := I to L - 1 do Valid[R][J] := False;
+        WriteLn(Format('  recording %d out of step from %.2f s, ignored from there',
+          [R + 1, Progs[R][I].T]));
+        Break;
+      end;
+      Inc(I, 16);
+    end;
+  end;
+  ScoreAll;
+
+  { find '/' : first even position >= 6 where '/' wins }
+  SlashPos := -1;
+  I := 6;
+  while I < L do
+  begin
+    Pick(I, True, Best, Second);
+    if Best = 16 then
+    begin
+      SlashPos := I;
+      Break;
+    end;
+    Inc(I, 2);
+  end;
+  if SlashPos < 0 then SlashPos := L - (L mod 2);
+
+  { choose characters: hex only, '/' only at its position }
+  Differ := 0;
+  for I := 0 to L - 1 do
+  begin
+    Pick(I, I = SlashPos, Best, Second);
+    if I = SlashPos then begin Best := 16; Second := 16; end;
+    Choice[I] := Best;
+    Choice2[I] := Second;
+    Margin[I] := Score[I][Best] - Score[I][Second];
+    if I <> SlashPos then
+      for R := 0 to NR - 1 do
+        if Valid[R][I] and (Progs[R][I].B <> CharOf(I)) then
+        begin
+          Inc(Differ);
+          Break;
+        end;
+  end;
+
+  { warn when a recording ends at a different place: different program? }
+  for R := 0 to NR - 1 do
+  begin
+    I := 6;
+    while (I <= High(Progs[R])) and (Progs[R][I].B <> Ord('/')) do Inc(I, 2);
+    if (NR > 1) and (I <= High(Progs[R])) and (I <> SlashPos) then
+      WriteLn(Format('  warning: recording %d has %d bytes, the result %d - a different program?',
+        [R + 1, (I - 6) div 2, (SlashPos - 6) div 2]));
+  end;
+
+  { warn when a recording mostly disagrees: different program? }
+  for R := 0 to NR - 1 do
+  begin
+    Agree := 0; Cnt := 0;
+    for I := 0 to Min(High(Progs[R]), SlashPos - 1) do
+      if Valid[R][I] and IsHexChar(Progs[R][I].B) then
+      begin
+        Inc(Cnt);
+        if Progs[R][I].B = CharOf(I) then Inc(Agree);
+      end;
+    if (NR > 1) and (Cnt > 16) and (Agree < Cnt * 8 div 10) then
+      WriteLn(Format('  warning: recording %d agrees only %d%% with the result - a different program?',
+        [R + 1, Agree * 100 div Cnt]));
+  end;
+
+  NData := (SlashPos - 6) div 2;
+  ID := HexVal(CharOf(0)) * 16 + HexVal(CharOf(1));
+  Addr := ByteAt(2) + ByteAt(4) * 256;
+
+  { Classify characters: certain (valid in a recording, no valid
+    contradiction), conflict (valid characters disagree) or unknown
+    (no recording has a valid character here). }
+  SetLength(Unknown, L);
+  NUnk := 0;
+  for I := 0 to L - 1 do
+  begin
+    Unknown[I] := False;
+    if (I = SlashPos) or (I > SlashPos + 4) then Continue;
+    HasValid := False; Conflict := False;
+    for R := 0 to NR - 1 do
+      if Valid[R][I] and IsHexChar(Progs[R][I].B) then
+      begin
+        HasValid := True;
+        if Progs[R][I].B <> CharOf(I) then Conflict := True;
+      end;
+    if not HasValid then
+    begin
+      Unknown[I] := True;
+      Inc(NUnk);
+      Margin[I] := 1E9;               { solved separately }
+    end
+    else if not Conflict then
+      Margin[I] := 1E9;               { certain }
+  end;
+
+  Matches := 0;
+  if (SlashPos + 4 < L) and (not CalcChecksums(CkCalc, CkTape) or (NUnk > 0)) then
+  begin
+    { conflicts with the smallest margins are the alternatives to try }
+    NU := 0;
+    for I := 2 to Min(L - 1, SlashPos + 4) do
+      if (I <> SlashPos) and (Margin[I] < 1E9) then
+      begin
+        J := NU;
+        if NU < MAXU then Inc(NU) else if Margin[I] >= Margin[UPos[MAXU - 1]] then Continue
+        else J := MAXU - 1;
+        while (J > 0) and (Margin[UPos[J - 1]] > Margin[I]) do
+        begin
+          UPos[J] := UPos[J - 1];
+          Dec(J);
+        end;
+        UPos[J] := I;
+      end;
+    UnkPos := -1;
+    if NUnk = 1 then
+      for I := 0 to L - 1 do if Unknown[I] then UnkPos := I;
+    BestCombo := -1; BestFlips := 99; BestScore := 0; BestUnk := 0;
+    VaryMask := 0; FirstMatch := -1; UnkVaries := False;
+    if NUnk <= 1 then
+      for Combo := 0 to (1 shl NU) - 1 do
+      begin
+        Total := 0; Flips := 0;
+        for K := 0 to NU - 1 do
+          if Odd(Combo shr K) then
+          begin
+            Q := Choice[UPos[K]]; Choice[UPos[K]] := Choice2[UPos[K]]; Choice2[UPos[K]] := Q;
+            Total := Total - Margin[UPos[K]];
+            Inc(Flips);
+          end;
+        Found := False; UnkVal := 0;
+        if UnkPos < 0 then
+          Found := CalcChecksums(CkCalc, CkTape)
+        else
+          { the checksum gives the value of the unknown character }
+          for UnkVal := 0 to 15 do
+          begin
+            Choice[UnkPos] := UnkVal;
+            if CalcChecksums(CkCalc, CkTape) then
+            begin
+              Found := True;
+              Break;
+            end;
+          end;
+        if Found then
+        begin
+          Inc(Matches);
+          if FirstMatch < 0 then
+          begin
+            FirstMatch := Combo; FirstUnk := UnkVal;
+          end
+          else
+          begin
+            VaryMask := VaryMask or (Combo xor FirstMatch);
+            if UnkVal <> FirstUnk then UnkVaries := True;
+          end;
+          if (Flips < BestFlips) or ((Flips = BestFlips) and (Total > BestScore)) then
+          begin
+            BestCombo := Combo; BestScore := Total; BestFlips := Flips; BestUnk := UnkVal;
+          end;
+        end;
+        for K := 0 to NU - 1 do
+          if Odd(Combo shr K) then
+          begin
+            Q := Choice[UPos[K]]; Choice[UPos[K]] := Choice2[UPos[K]]; Choice2[UPos[K]] := Q;
+          end;
+      end;
+    if BestCombo >= 0 then
+    begin
+      for K := 0 to NU - 1 do
+        if Odd(BestCombo shr K) then
+        begin
+          I := UPos[K];
+          Q := Choice[I]; Choice[I] := Choice2[I]; Choice2[I] := Q;
+        end;
+      if UnkPos >= 0 then Choice[UnkPos] := BestUnk;
+      LastByte := -1;
+      for K := -1 to NU - 1 do
+      begin
+        if K < 0 then
+        begin
+          if UnkPos < 0 then Continue;
+          I := UnkPos;
+        end
+        else
+        begin
+          if not Odd((BestCombo or VaryMask) shr K) then Continue;
+          I := UPos[K];
+        end;
+        if I >= SlashPos then Continue;
+        J := I - Ord(Odd(I));
+        if J = LastByte then Continue;
+        LastByte := J;
+        if (K >= 0) and Odd(VaryMask shr K) then
+        begin
+          Q := Choice[I]; Choice[I] := Choice2[I];
+          AltText := H2(ByteAt(J));
+          Choice[I] := Q;
+          WriteLn(Format('  byte $%s uncertain: %s (or %s)', [H4(Addr + (J - 6) div 2), H2(ByteAt(J)), AltText]));
+        end
+        else if (K < 0) and UnkVaries then
+          WriteLn(Format('  byte $%s uncertain: %s (unreadable in all recordings)', [H4(Addr + (J - 6) div 2), H2(ByteAt(J))]))
+        else if K < 0 then
+          WriteLn(Format('  byte $%s unreadable, value %s from checksum', [H4(Addr + (J - 6) div 2), H2(ByteAt(J))]))
+        else
+          WriteLn(Format('  byte $%s conflict, set by checksum: %s', [H4(Addr + (J - 6) div 2), H2(ByteAt(J))]));
+      end;
+    end
+    else
+    begin
+      for I := 0 to L - 1 do
+        if Unknown[I] and (I < SlashPos) and (I >= 6) then
+          WriteLn(Format('  byte $%s unreadable in all recordings', [H4(Addr + (I - 6) div 2)]));
+    end;
+  end;
+
+  CalcChecksums(CkCalc, CkTape);
+  for I := 0 to NData - 1 do
+  begin
+    if ConOut then Write(Chr(CharOf(6 + 2 * I)), Chr(CharOf(7 + 2 * I)))
+    else WriteChar(ByteAt(6 + 2 * I));
+  end;
+  WriteLn;
+  Write('Program ', H2(ID), '  address ', H4(Addr), '  checksum ');
+  if CkCalc = CkTape then Write('OK') else Write('ERROR');
+  Write('  ', NData, ' bytes');
+  Write(Format(', %d recordings, %d characters differed', [NR, Differ]));
+  if Matches > 1 then
+    Write(Format(', %d combinations fit the checksum: fewest changes used', [Matches]));
+  WriteLn;
+end;
+
+procedure DecodeCombined;
+var
+  Recs: array of TTapeRec;
+  R, K, NP, N: Integer;
+  Progs: array of TTapeProg;
+  Names: array of string;
+begin
+  if SymMode or Classic then
+    Abort2('Combining recordings needs the default decoder (no -U or -K)');
+  SetLength(Recs, Length(InFiles));
+  for R := 0 to High(InFiles) do
+  begin
+    Reader := TAudioReader.Create(InFiles[R], Wave = wtRAW, SampleRate);
+    try
+      Write(Format('%d: %s %d Hz  ', [R + 1, ExtractFileName(InFiles[R]), Reader.Rate]));
+      PrepareBits;
+      Recs[R] := CollectPrograms;
+    finally
+      FreeAndNil(Reader);
+    end;
+  end;
+  NP := 0;
+  for R := 0 to High(Recs) do NP := Max(NP, Length(Recs[R]));
+  if NP = 0 then Exit;
+  for K := 0 to NP - 1 do
+  begin
+    Progs := nil; Names := nil;
+    N := 0;
+    for R := 0 to High(Recs) do
+      if K <= High(Recs[R]) then
+      begin
+        SetLength(Progs, N + 1); SetLength(Names, N + 1);
+        Progs[N] := Recs[R][K];
+        Names[N] := InFiles[R];
+        Inc(N);
+      end;
+    CombineProgram(Progs, Names, K);
   end;
 end;
 
@@ -2015,8 +2520,24 @@ begin
     end;
   end;
   if Length(Names) = 0 then Help;
-  if Decoding then InFile := AddExt(Names[0], WaveExt)
-  else InFile := AddExt(Names[0], '.PRG');
+  { several recordings of one tape: rec1.wav+rec2.wav+... }
+  InFiles := nil;
+  A := Names[0];
+  while A <> '' do
+  begin
+    I := Pos('+', A);
+    if I = 0 then I := Length(A) + 1;
+    if I > 1 then
+    begin
+      SetLength(InFiles, Length(InFiles) + 1);
+      if Decoding then InFiles[High(InFiles)] := AddExt(Copy(A, 1, I - 1), WaveExt)
+      else InFiles[High(InFiles)] := AddExt(Copy(A, 1, I - 1), '.PRG');
+    end;
+    Delete(A, 1, I);
+  end;
+  if Length(InFiles) = 0 then Help;
+  if (Length(InFiles) > 1) and not Decoding then BadOption;
+  InFile := InFiles[0];
   if Length(Names) > 1 then
     OutFile := Names[1]
   else
@@ -2026,12 +2547,17 @@ begin
 end;
 
 procedure OpenInFile;
+var
+  I: Integer;
 begin
   WriteLn;
-  Write('infile:  ', InFile);
-  if not FileExists(InFile) then
-    Abort2(' file not found');
-  WriteLn;
+  for I := 0 to High(InFiles) do
+  begin
+    Write('infile:  ', InFiles[I]);
+    if not FileExists(InFiles[I]) then
+      Abort2(' file not found');
+    WriteLn;
+  end;
 end;
 
 procedure OpenOutFile;

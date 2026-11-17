@@ -37,6 +37,12 @@ kimtape -M -B3 -S44100 -W16 PROG.BIN TAPE.WAV    HYPERTAPE 3x, 44.1 kHz 16 bit
 kimtape -P1 STEREO.WAV PROG.BIN                  decode left channel only
 ```
 
+Several recordings of the same tape can be combined (see below):
+
+```
+kimtape REC1.WAV+REC2.WAV+REC3.WAV PROG.BIN
+```
+
 Switches start with `-`. On Windows `/` also works, as in the DOS original.
 
 ## What is new compared to the DOS version
@@ -70,6 +76,25 @@ Switches start with `-`. On Windows `/` also works, as in the DOS original.
   samples, WAVE_FORMAT_EXTENSIBLE, mono or stereo. Extra chunks (LIST,
   fact, ...) are skipped. The decoder is the original algorithm, but it
   measures cycle lengths in time instead of samples at 22050 Hz.
+- **Combining recordings:** `rec1.wav+rec2.wav+...` decodes each
+  recording and combines them character by character:
+  - each bit is a vote weighted by the decoder's confidence; recordings
+    with invalid characters nearby (error bursts) count less, and a
+    recording that slips out of step is ignored from that point;
+  - only valid hex characters can win;
+  - a character that no recording could read is calculated from the
+    checksum when it is the only one;
+  - if the checksum still does not match, alternatives for the
+    conflicting characters are tried and the combination with the
+    fewest changes is used;
+  - every byte that was decided this way is listed. When several
+    combinations fit the checksum, the bytes are listed as
+    "uncertain" with their alternative, so they can be checked by hand
+    (for example against the 6502 code);
+  - a warning is shown when a recording seems to hold a different
+    program (different length, or little agreement).
+
+  Programs are matched by their order in each recording.
 - **Automatic level adjustment** for the classic decoder (`-K`, SYM-1):
   DC offset is removed and the level is normalised, so quiet 16-bit
   recordings decode. `-N` gives the original fixed levels; `-F`, `-H`
@@ -95,7 +120,11 @@ Switches start with `-`. On Windows `/` also works, as in the DOS original.
   then fades the level, which damages the first part of the data.
 - Record at a moderate level with no clipping; 16 bit, 44.1 or 48 kHz,
   mono or stereo.
+- Also turn off noise suppression, noise gates and limiters. They cut
+  quiet parts to silence and squash the loud parts.
+- Record the whole program plus a few seconds of silence after it.
 - If one stereo channel is cleaner, select it with `-P1` or `-P2`.
+- Several recordings of a difficult tape can be combined (`+`).
 
 ## Building
 
