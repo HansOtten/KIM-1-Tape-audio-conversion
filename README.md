@@ -175,7 +175,7 @@ fpc -O2 kimtape.pas
 
 ## Credits
 
-The original KIMTAPE was written in DX-Forth and released as public
+The original KIMTAPE was written in DX-Forth by Ed Smeda and released as public
 domain. This port follows its structure word by word; Forth word names
 appear in the comments.
 
