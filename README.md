@@ -1,6 +1,6 @@
 # KIMTAPE, read and write KIM-1 audio datafiles
 
-A Free Pascal port of KIMTAPE 0.5 (17-May-04), the DX-Forth DOS utility
+A Free Pascal port of KIMTAPE 0.5 (17-May-04), the DX-Forth DOS utility by Ed Smeda
 that converts KIM-1 and SYM-1 cassette tape audio (KIM-1, HYPERTAPE 2x/3x/6x,
 SYM-1 high speed) to program files and back. 
 Crossplatform thanks to Freepascal source.
