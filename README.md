@@ -6,7 +6,7 @@ SYM-1 high speed) to program files and back.
 Crossplatform thanks to Freepascal source.
 
 The command line is the same as the original's with additions. 
-
+```
 KIMTAPE version 1.0  (Free Pascal port of KIMTAPE 0.5)
 
 Use:  KIMTAPE [options] infile[.typ] [outfile[.typ]]
@@ -34,7 +34,7 @@ Several recordings of the same tape can be combined:
 
 default: decode WAV file, KIM-1 format
          load address=0200, file ID=00
-
+```
 Conversion utility for KIM-1 and SYM-1 format audio tapes.
 Input WAV files may use any sample rate (44100, 48000, ...),
 8/16/24/32 bit integer or float samples, mono or stereo.
