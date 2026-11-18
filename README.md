@@ -1,15 +1,15 @@
-# KIMTAPE for Free Pascal
+# KIMTAPE, read and write KIM-1 audio datafiles
 
 A Free Pascal port of KIMTAPE 0.5 (17-May-04), the DX-Forth DOS utility
 that converts KIM-1 and SYM-1 cassette tape audio (KIM-1, HYPERTAPE 2x/3x/6x,
-SYM-1 high speed) to program files and back. It runs natively on Windows,
-Linux and macOS, so no DOS emulator is needed.
+SYM-1 high speed) to program files and back. 
+Crossplatform thanks to Freepascal source.
 
-The command line is the same as the original's. See `original/KIMTAPE.TXT` for the full
-user notes.
+The command line is the same as the original's with additions. 
 
-```
-KIMTAPE [options] infile[.typ] [outfile[.typ]]
+KIMTAPE version 1.0  (Free Pascal port of KIMTAPE 0.5)
+
+Use:  KIMTAPE [options] infile[.typ] [outfile[.typ]]
 
 -C    console output              -M    make wavefile
 -Bn   HYPERTAPE speed  2x 3x 6x   -I    invert wavefile
@@ -19,15 +19,27 @@ KIMTAPE [options] infile[.typ] [outfile[.typ]]
 -Gn   timing  -2 to 2             -T    sine tone
 -An   load address (hex)          -Dn   prog ID (hex)
 
-Additional options:
+Additional options in this version:
 -K    classic decoder (zero crossings, as KIMTAPE 0.5)
 -En   high tone boost 0..4 (default: automatic)
 -N    no automatic DC/level adjust  (-K and SYM-1 decoding)
 -Pn   channel  0=mix 1=left 2=right  (decode, stereo files)
--Sn   sample rate: output wavefile (encode) or RAW input (decode)
--Wn   sample width 8 or 16 bits  (encode)
+-Sn   sample rate: output wavefile (encode, default 22050)
+      or RAW input file (decode, default 22050)
+-Wn   sample width 8 or 16 bits  (encode, default 8)
 -O    overwrite output file without asking
-```
+
+Several recordings of the same tape can be combined:
+  KIMTAPE rec1.wav+rec2.wav+rec3.wav outfile
+
+default: decode WAV file, KIM-1 format
+         load address=0200, file ID=00
+
+Conversion utility for KIM-1 and SYM-1 format audio tapes.
+Input WAV files may use any sample rate (44100, 48000, ...),
+8/16/24/32 bit integer or float samples, mono or stereo.
+Output is an 8-bit mono WAV, VOC or RAW wavefile recorded at
+22,050 samples per second unless -S / -W are given.
 
 Examples:
 
@@ -140,11 +152,6 @@ Switches start with `-`. On Windows `/` also works, as in the DOS original.
 
 ```
 fpc -O2 kimtape.pas
-```
-
-Free Pascal 3.2 or later; no other units needed. To build the Windows
-executable from Linux, install the win64 units and run
-`fpc -Twin64 -O2 kimtape.pas`.
 
 ## Verification
 
